@@ -11,7 +11,7 @@ The open-source host agent for [SUB&SUB Monitor](https://tools.subnsub.com/monit
   └──────────────────┘    via DERP relay         └─────────────────┘  no relay, no token)
 ```
 
-Nothing listens on the machine in either mode. The helper dials out: either pushing snapshots over HTTPS to the relay, or establishing an end-to-end encrypted WireGuard tunnel (via a DERP relay) that only authorized browsers can open.
+Nothing listens on the machine for the internet. The helper dials out: either pushing snapshots over HTTPS to the relay, or establishing an end-to-end encrypted WireGuard tunnel (via a DERP relay) that only authorized browsers can open. The one exception is direct mode on a machine that is on a Tailscale network, which also answers on its Tailscale address (see [Tailnet road](#tailnet-road)).
 
 This repository contains the Go helper (`go/`), the installation scripts (`install.sh`, `install.ps1`), ready-to-use custom metric definitions (`metrics.d.examples/`), and the single-file Python reference implementation (`reference/monitor.py`). For a complete breakdown of what leaves the machine, what the relay stores, and how command signing works, see the [Trust & Security Model](https://tools.subnsub.com/monitor-security).
 
@@ -120,6 +120,15 @@ The Direct card on the Monitor page generates a browser node key and prints this
 - **Read-only by default:** The tunnel only starts when at least one browser key is listed in `~/.config/subnsub-monitor/allowed-clients` (`subnsub-monitor allow <key>` / `disallow <key>`). Allowing a browser node key grants **read-only** observation (`hello`, snapshots, 1 Hz health stream, and local history). Commands and interactive terminals require the browser's Ed25519 signing key to be pinned in `trusted-keys` (`MON_PUBKEY` or `subnsub-monitor trust <key>`).
 - **Hybrid mode (Relay + Direct):** When configured with both a relay token and `--direct`, both transports run side by side. Interactive terminals and plaintext shell commands always travel exclusively over the direct tunnel, never through the relay. Set `MON_TRANSPORT=relay` or `MON_TRANSPORT=tailcat` to force a single transport.
 - **CLI controls:** `subnsub-monitor direct on|off`, `allow`, `disallow`, `address` (prints the direct address and node key, and a pairing still waiting), and `transfer on|off` (allows an authorized browser to relay an end-to-end encrypted peer-to-peer file transfer stream through the tunnel when direct WebRTC fails; enabled by default when direct mode is on).
+
+### Tailnet road
+
+From helper 2026.11.03.1, a machine in direct mode that is on a Tailscale network also listens on its Tailscale address (normally port 8126), so a browser on a computer that runs Tailscale reaches it through the operating system's Tailscale, directly over UDP whenever Tailscale can manage it, instead of through DERP. The page tries this road first, then the tunnel, then the relay.
+
+- **Found without the CLI:** the address comes from the machine's interfaces and the name from Tailscale's resolver at `100.100.100.100` (`tailnet.go`). Nothing listens while Tailscale is down or no browser key is allowed. `MON_TAILNET=off` keeps the port closed.
+- **The network is not trusted:** anything on the tailnet can reach the port. A browser takes the machine's X25519 key from a hello that came through the tunnel, its own key must be on `allowed-clients`, and a session is derived from both plus a fresh key on each side (HKDF-SHA256). Every request and answer is AES-256-GCM to that session, numbered so none can be replayed, cut short or moved. A struck key is refused on its next request.
+- **What it carries:** the same read-only view, commands and terminals as the tunnel. Transfers stay on the tunnel.
+- **Browsers:** Chrome, which can reach a local network address from an https page once the user allows local network access. Other browsers stay on the tunnel. See [the Monitor docs](https://tools.subnsub.com/monitor-docs) for the API.
 
 ### Pairing
 

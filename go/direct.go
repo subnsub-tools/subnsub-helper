@@ -420,6 +420,7 @@ func runDirect(ctx context.Context) {
 	startProbes()
 	startCustom()
 	startIPv4()
+	go runTailnet(ctx)
 	conf := configDir()
 	if conf == "" {
 		warnf("direct: no home directory, cannot keep a tunnel identity")
@@ -973,10 +974,15 @@ func (h *directHandler) helloFrame(r *http.Request) ([]byte, error) {
 		}
 		return transport.Encode(f)
 	}
+	carrier := "tailcat"
+	if tailnetRequest(r) {
+		carrier = "tailnet"
+	}
 	f, err := transport.New(transport.TypeHello, agentID(), r.Header.Get("X-Request-Id"), transport.Hello{
 		HelperVersion: helperVersion,
 		Caps:          directCaps(),
-		Carrier:       "tailcat",
+		Carrier:       carrier,
+		Tailnet:       tailnetRoadNow(),
 	})
 	if err != nil {
 		return nil, err
@@ -1082,6 +1088,13 @@ func systemFrame() ([]byte, error) {
 // tunnel needs — a slot cap, a per-write deadline, and a periodic re-check
 // that the peer is still allowed, since a stream outlives the request the
 // gate looked at.
+//
+// A PUBLISHED PROMISE: self-hosted panels keep their own copy of the browser
+// client, and that client ends a stream at any frame type it does not know.
+// So this default stream stays hello, snapshot and system; a new type goes out
+// only to a reader that asks for it in the query. New fields in a body are
+// fine. TestDirectEventsStaysReadableByPublishedClients holds this, and
+// infra/monitor-client-compat.mjs holds the release to it.
 func (h *directHandler) events(w http.ResponseWriter, r *http.Request) {
 	h.streams.Lock()
 	if h.streams.n >= directMaxStreams {
@@ -1106,7 +1119,9 @@ func (h *directHandler) events(w http.ResponseWriter, r *http.Request) {
 	var rxN int64 = -1
 	var rxAt, rxLooked time.Time
 	acked := func(now time.Time) bool {
-		if h.carrier == nil {
+		// The tailnet road's acknowledgements are the operating system's own,
+		// out of sight here: no evidence either way, so none is claimed.
+		if h.carrier == nil || tailnetRequest(r) {
 			return false
 		}
 		if now.Sub(rxLooked) >= streamAckEvery {
@@ -1173,7 +1188,11 @@ func (h *directHandler) events(w http.ResponseWriter, r *http.Request) {
 			// Revocation reaches an open stream here: the key was struck
 			// from the file, so the stream ends. The page sees the close
 			// and, on reconnecting, the gate's 403.
-			if h.carrier != nil {
+			if tailnetRequest(r) {
+				if !tailnetAdmitted(peer) {
+					return
+				}
+			} else if h.carrier != nil {
 				if k, ok := h.carrier.PeerKey(r.RemoteAddr); !ok || k != peer {
 					return
 				}

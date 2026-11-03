@@ -239,6 +239,46 @@ func TestDirectHandlerServesFramesOnly(t *testing.T) {
 
 // The stream opens with hello and a snapshot, then carries the host block —
 // as SSE data lines that are frames — and it is capped.
+// A self-hosted panel keeps its own copy of the browser client, which ends a
+// stream at any frame type it does not know: the default stream may not grow
+// one (monitor-docs.html promises this).
+func TestDirectEventsStaysReadableByPublishedClients(t *testing.T) {
+	scratchHome(t)
+	startSysSampler()
+	srv := httptest.NewServer(newDirectHandler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/v1/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	n := 0
+	for n < 5 && sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		f, err := transport.Decode([]byte(strings.TrimPrefix(line, "data: ")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch f.Type {
+		case transport.TypeHello, transport.TypeSnapshot, transport.TypeSystem:
+		default:
+			t.Fatalf("the default stream carried a %q frame, which published clients end the stream on", f.Type)
+		}
+		n++
+	}
+	if n < 5 {
+		t.Fatalf("stream gave %d frames", n)
+	}
+}
+
 func TestDirectEventsStreamShapeAndCap(t *testing.T) {
 	scratchHome(t)
 	startSysSampler()

@@ -492,8 +492,10 @@ func PeerFromContext(ctx context.Context) (k key.NodePublic, ok bool) {
 
 // WithPeer returns ctx carrying k as the request's tunnel peer — what Gate
 // does for a real request, offered so a handler can be exercised in a test
-// without a tunnel. Never used on a request path: the peer of a real
-// request is whoever the tunnel attributed it to, and nothing else.
+// without a tunnel. On a request path it is used by the tailnet road alone
+// (main package, tailnet.go), whose peer is whoever proved that key to open
+// the sealed session the request came in; on the tunnel the peer is whoever
+// the tunnel attributed it to, and nothing else.
 func WithPeer(ctx context.Context, k key.NodePublic) context.Context {
 	return context.WithValue(ctx, peerKeyCtx{}, k)
 }

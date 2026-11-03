@@ -169,6 +169,22 @@ type Hello struct {
 	// "derp-<region>" or "direct" for tailcat. Diagnostic only; never the
 	// peer's real address (plan: no endpoint metadata in product logs).
 	Path string `json:"path,omitempty"`
+	// Tailnet is where this machine also answers on its Tailscale network,
+	// for a reader to reach it without the tunnel (main package, tailnet.go).
+	// Absent when Tailscale is not up here, and never told to a transfer guest.
+	Tailnet *TailnetRoad `json:"tailnet,omitempty"`
+}
+
+// TailnetRoad names the machine's listener on its Tailscale network. Host is
+// the MagicDNS name, empty when MagicDNS gives none; IP always works. Key is
+// the machine's X25519 key in text, which the reader holds it to on that road:
+// what told the reader this came through the tunnel, so the network underneath
+// is not asked to vouch for who answers.
+type TailnetRoad struct {
+	Host string `json:"host,omitempty"`
+	IP   string `json:"ip"`
+	Port int    `json:"port"`
+	Key  string `json:"key"`
 }
 
 // Error is the body of a TypeError frame.
