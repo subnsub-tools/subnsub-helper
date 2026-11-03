@@ -554,7 +554,8 @@ func (t *tailnetServer) open(w http.ResponseWriter, r *http.Request) {
 func tailnetInnerOK(p string) bool {
 	switch p {
 	case "/v1/hello", "/v1/snapshot", "/v1/events", "/v1/command", "/v1/history",
-		"/v1/pty/out", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close":
+		"/v1/pty/out", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close",
+		"/v1/music", "/v1/music/index", "/v1/music/file", "/v1/music/art":
 		return true
 	}
 	return false
@@ -715,7 +716,14 @@ func (t *tnWriter) WriteHeader(status int) {
 		return
 	}
 	t.sent = true
-	head, _ := json.Marshal(map[string]any{"s": status, "t": t.header.Get("Content-Type")})
+	m := map[string]any{"s": status, "t": t.header.Get("Content-Type")}
+	// The length, when the handler gave one (the music reads do): the page
+	// counts the data records against it, so an answer cut short is not taken
+	// for the whole of one.
+	if l, err := strconv.ParseInt(t.header.Get("Content-Length"), 10, 64); err == nil && l >= 0 {
+		m["l"] = l
+	}
+	head, _ := json.Marshal(m)
 	t.record(tnKindHead, head)
 }
 

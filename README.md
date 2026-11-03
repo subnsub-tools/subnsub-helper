@@ -86,6 +86,8 @@ The `<TOKEN>` comes from your signed-in Monitor dashboard. You can use the same 
 | `--direct --allow nodekey:…` | Enable direct mode for the specified browser node key (no account or token required; see [Direct mode](#direct-mode)) |
 | `--pair <token>` | Pair with the self-hosted Monitor page that made the line, for the last `--allow` key on it, so the machine shows up there without its address being pasted back (see [Pairing](#pairing)) |
 | `--derpmap https://…` | Use a custom DERP map URL instead of the default public map |
+| `--music` | With `--direct`, share this account's Music folder with the browsers on the direct allowlist; on a machine that already runs the helper, the same line switches it on there (`--music=off` stops sharing; see [Music](#music)) |
+| `--music-dir PATH` | Share this folder instead (repeatable; implies `--music`) |
 
 When copied from a signed-in dashboard, the install command also sets `MON_PUBKEY=…` to pin your dashboard's Ed25519 public key in `~/.config/subnsub-monitor/trusted-keys` (see [Command signing (`trust`)](#command-signing-trust)).
 
@@ -127,8 +129,17 @@ From helper 2026.11.03.1, a machine in direct mode that is on a Tailscale networ
 
 - **Found without the CLI:** the address comes from the machine's interfaces and the name from Tailscale's resolver at `100.100.100.100` (`tailnet.go`). Nothing listens while Tailscale is down or no browser key is allowed. `MON_TAILNET=off` keeps the port closed.
 - **The network is not trusted:** anything on the tailnet can reach the port. A browser takes the machine's X25519 key from a hello that came through the tunnel, its own key must be on `allowed-clients`, and a session is derived from both plus a fresh key on each side (HKDF-SHA256). Every request and answer is AES-256-GCM to that session, numbered so none can be replayed, cut short or moved. A struck key is refused on its next request.
-- **What it carries:** the same read-only view, commands and terminals as the tunnel. Transfers stay on the tunnel.
+- **What it carries:** the same read-only view, commands, terminals and music as the tunnel. Transfers stay on the tunnel.
 - **Browsers:** Chrome, which can reach a local network address from an https page once the user allows local network access. Other browsers stay on the tunnel. See [the Monitor docs](https://tools.subnsub.com/monitor-docs) for the API.
+
+### Music
+
+From helper 2026.11.04.1, a machine in direct mode can share the music on it with the browsers on its `allowed-clients` list. The Monitor page's music player reads it over the tailnet road or the tunnel, never through the relay: no music route is reachable from the relay's mailbox, and the `music` command kind is refused there (`music.go`).
+
+- **Switched on at the machine:** `subnsub-monitor music on` (with nothing shared yet, it shares the account's Music folder), `music add FOLDER`, `music add-webdav URL [--user NAME]` (the password comes from `MON_WEBDAV_PASSWORD` or is asked for), `music remove ID|FOLDER|URL`, `music rescan`, `music off`, and `music` to list what is shared. At install, `--music` turns it on (`--music-dir PATH`, repeatable, names folders; `--music=off` turns it off); rerunning the install line with `--music` on a machine that already has the helper switches it on there. `MON_MUSIC=off` keeps it off for a run.
+- **Only what the walk indexed:** a folder is walked for audio files (MP3, AAC/M4A, FLAC, Ogg/Opus, WAV, AIFF, WebM, CAF), at most 16 folders per machine, 100,000 tracks per folder and 24 levels deep. A request names a track by its path in that folder's index and is answered only if the index holds it; local reads go through `os.Root`, which refuses any path that leaves the folder. Tags, durations and covers are read on the machine (`musictags.go`); covers are scaled there (128, 256, 512 or 1024 px).
+- **What travels:** `GET /v1/music` (the folders, their track counts and revisions), `/v1/music/index` (one page of a folder's tracks), `/v1/music/file` (a range of a track's bytes, at most 4 MiB per request) and `/v1/music/art` (a scaled cover), all over the tunnel or the tailnet road, sealed as everything else there is.
+- **WebDAV:** a WebDAV folder (a NAS, Nextcloud) is listed with `PROPFIND` and read by range by the helper itself (`musicdav.go`). A browser whose signing key the machine has pinned may add one, look through any folder again, or stop sharing one, by a signed `music` command over the tunnel; it cannot name a local folder, which is added only at the machine. The account and password are kept in `music.json` (mode `0600`) on the machine and nowhere else. A server whose certificate the system does not trust is refused until its SHA-256 fingerprint is pinned (`cert-untrusted` carries the fingerprint for the page to show); a changed certificate is refused as `cert-changed`.
 
 ### Pairing
 
@@ -170,6 +181,7 @@ For collectors that invoke a local CLI (`codex`, `amp`, `kiro-cli`, `agy`), the 
 - **Read-only credential access:** The helper never refreshes tokens or modifies credential files. If a token expires, the helper reports `token-expired` until the vendor CLI renews it.
 - **Sanitized error reporting:** Because collector error codes are included in snapshots, raw HTTP library errors, URLs, and headers are never interpolated into published output. All failures map to a closed vocabulary of error and detail codes (`go/detail.go`).
 - **No intrusive host access:** The helper never reads browser cookies, shell history, SSH keys, or arbitrary environment variables, and never requests macOS Full Disk Access.
+- **Music only when shared:** nothing in a music folder is read until music is switched on at the machine; then only the audio files and covers in the shared folders, and only for the browsers on the direct allowlist, over the tunnel or the tailnet road, never through the relay (see [Music](#music)).
 - **Quota request pacing:** Remote vendor APIs are queried on demand when you click refresh (or at most once every 10 minutes while actively watching a machine configured for automatic refresh), preventing background rate-limit exhaustion (`go/pace.go`).
 
 **What is included in a snapshot (`go/types.go`):**
@@ -508,6 +520,11 @@ subnsub-monitor allow [KEY]            List or add a browser tailcat node key fo
 subnsub-monitor disallow KEY           Revoke a browser tailcat node key
 subnsub-monitor address                Print this machine's direct tunnel address and node key
 subnsub-monitor transfer [on|off]      Show or set encrypted peer-to-peer transfer relay on tunnel
+subnsub-monitor music [on|off]         List what is shared with direct-mode browsers, or switch it on or off
+subnsub-monitor music add FOLDER       Share a local folder (only at the machine, never from a page)
+subnsub-monitor music add-webdav URL   Share a WebDAV folder (--user NAME; password from MON_WEBDAV_PASSWORD)
+subnsub-monitor music remove ID        Stop sharing a folder, named by its ID, its path or its URL
+subnsub-monitor music rescan           Have the running helper walk every shared folder again
 subnsub-monitor clone [use|forget]     Show, import, or delete a delegated terminal access copy
 subnsub-monitor run MACHINE -- CMD     Run a single command on a remote machine via a delegated copy
 subnsub-monitor shell MACHINE          Open an interactive terminal on a remote machine
@@ -535,6 +552,8 @@ Every persistent toggle is stored as a file in `~/.config/subnsub-monitor/`; env
 | `MON_DERPMAP` | Custom HTTPS URL for the tailcat DERP map |
 | `MON_TRANSPORT` | `relay` or `tailcat`: force a single transport mode |
 | `MON_TRANSFER` | `1` or `0`: allow/disallow encrypted file transfer piping over the direct tunnel |
+| `MON_MUSIC` | Set `off` to share no music for this run, whatever `music.json` says |
+| `MON_WEBDAV_PASSWORD` | The password `music add-webdav` stores for the folder (asked for when unset) |
 | `MON_BEACON` | Set `off` to keep sending full snapshots to the relay while a direct tunnel is active |
 | `MON_IPV4` | `off`, or a custom `cdn-cgi/trace`-compatible HTTPS URL for public IPv4 lookup |
 | `MON_MYIP` | `off`, or a custom HTTPS origin for on-demand exit IP checks |
@@ -561,6 +580,7 @@ All state lives in `~/.config/subnsub-monitor/` (mode `0700`):
 | `trusted-keys`, `econ-key` | Pinned Ed25519 command-signing public keys and the machine's X25519 sealing key |
 | `allowed-clients`, `tailcat.key`, `tailcat.psk`, `address` | Authorized browser node keys and WireGuard/tailcat tunnel credentials |
 | `pairing` | A pairing token from the self-hosted page's line and the browser key it is for, until that browser has the address (at most a week) |
+| `music.json`, `music-index.json` | The shared music folders, with a WebDAV folder's account and password (mode `0600`), and the index of their tracks |
 | `clone-access`, `clones`, `clones.revoked` | Client-side delegated access credential and host-side admitted/revoked copy records |
 | `probes.json`, `probes.key`, `probes-state.json` | Service probe definitions, target HMAC key, and rolling uptime buckets |
 | `metrics.d/`, `metrics.sock` | Custom metric definitions and the local Unix domain push socket |

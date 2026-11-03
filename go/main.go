@@ -54,6 +54,8 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor address                print this machine's direct address and node key
   subnsub-monitor transfer [on|off]      show or set whether an allowed browser may route one of its
                                          own file transfers through this machine's tunnel
+  subnsub-monitor music [on|off|add|...] show or set the music this machine shares with the browsers
+                                         on its direct allowlist (tailnet and tailcat only)
   subnsub-monitor clone [use|forget]     show, save, or delete a portable terminal access copy
   subnsub-monitor run MACHINE -- CMD     run a command on a machine using a portable copy
   subnsub-monitor shell MACHINE          open an interactive terminal on a machine using a portable copy
@@ -579,6 +581,9 @@ func main() {
 
 	case "transfer":
 		os.Exit(runTransferCLI(args[1:]))
+
+	case "music":
+		os.Exit(runMusicCLI(args[1:]))
 
 	case "probes":
 		os.Exit(runProbesCLI(args[1:]))

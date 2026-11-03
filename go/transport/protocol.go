@@ -83,6 +83,12 @@ const (
 	// a browser that minted the line learns where the machine it installed
 	// actually waits. Its body is Pair. Served on request, never streamed.
 	TypePair = "pair"
+	// TypeMusic is the machine's shared music library (music.go): which
+	// roots it shares and, a page at a time, the tracks in one of them. Served
+	// on request over the direct roads only, never streamed and never sent to
+	// the relay. The audio itself is not framed: /v1/music/file answers with
+	// the file's own bytes.
+	TypeMusic = "music"
 )
 
 // Limits are the byte ceilings per frame type, applied to the SERIALISED
@@ -99,6 +105,9 @@ var Limits = map[string]int{
 	TypeHistory:  1 << 20,
 	TypePipe:     4 << 10,
 	TypePair:     4 << 10,
+	// Under the browser module's 1 MiB answer ceiling (tailcat-web
+	// maxGetBody), envelope included.
+	TypeMusic: 960 << 10,
 }
 
 // Capabilities a peer may announce or be granted. Each one is authorised on
@@ -141,6 +150,10 @@ const (
 	// myip.go) — six fixed requests to the machine's configured origin, the
 	// answers handed back. Named where a key is pinned and the check is on.
 	CapMyIP = "myip"
+	// CapMusic: the machine shares music (music.go) — folders its operator
+	// named on the machine, and WebDAV folders a pinned dashboard added —
+	// with the browsers on its allowlist, over the direct roads alone.
+	CapMusic = "music"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on

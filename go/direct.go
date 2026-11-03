@@ -421,6 +421,7 @@ func runDirect(ctx context.Context) {
 	startCustom()
 	startIPv4()
 	go runTailnet(ctx)
+	musicStart()
 	conf := configDir()
 	if conf == "" {
 		warnf("direct: no home directory, cannot keep a tunnel identity")
@@ -609,6 +610,11 @@ func newDirectHandler() *directHandler {
 	h.mux.HandleFunc("/v1/pty/in", h.ptyIn)
 	h.mux.HandleFunc("/v1/pty/resize", h.ptyResize)
 	h.mux.HandleFunc("/v1/pty/close", h.ptyClose)
+	// The shared music (music.go): reads only, for an allowlisted key.
+	h.mux.HandleFunc("/v1/music", h.musicStatus)
+	h.mux.HandleFunc("/v1/music/index", h.musicIndex)
+	h.mux.HandleFunc("/v1/music/file", h.musicFile)
+	h.mux.HandleFunc("/v1/music/art", h.musicArt)
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusNotFound, "unknown-frame")
 	})
@@ -799,6 +805,23 @@ func directCaps() []string {
 	return caps
 }
 
+// directCapsFor is directCaps with what belongs to the asking key alone:
+// music is read by the browsers on the allowlist, not by a portable copy.
+func directCapsFor(r *http.Request) []string {
+	caps := directCaps()
+	if !musicOn() {
+		return caps
+	}
+	if k, ok := transport.PeerFromContext(r.Context()); ok {
+		for _, a := range loadAllowedClients() {
+			if a == k {
+				return append(caps, transport.CapMusic)
+			}
+		}
+	}
+	return caps
+}
+
 // command is the mailbox's other door, and the console's only one: the same
 // command envelope, POSTed through the tunnel by an allowed browser instead of
 // collected from the relay. A shell line comes this way or not at all — the
@@ -980,7 +1003,7 @@ func (h *directHandler) helloFrame(r *http.Request) ([]byte, error) {
 	}
 	f, err := transport.New(transport.TypeHello, agentID(), r.Header.Get("X-Request-Id"), transport.Hello{
 		HelperVersion: helperVersion,
-		Caps:          directCaps(),
+		Caps:          directCapsFor(r),
 		Carrier:       carrier,
 		Tailnet:       tailnetRoadNow(),
 	})

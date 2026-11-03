@@ -73,6 +73,18 @@
 # in a line. Until the pairing is done, treat the line like a password: whoever
 # runs it first is the machine that page will show.
 #
+# MUSIC — add --music to a --direct line and the browsers on this machine's
+# direct allowlist can play the music in its Music folder (or the folders
+# named with --music-dir PATH, which may be given more than once). Played over
+# the tailnet or the tailcat tunnel only, never through the relay; the files
+# stay here and are read only when a browser asks. Run the line again on a
+# machine that already has the helper to switch it on there; --music=off
+# stops sharing and keeps the list. 'subnsub-monitor music' shows what is
+# shared and changes it, and WebDAV folders the helper fetches are added from
+# the Monitor page by a pinned dashboard key, or here with 'music add-webdav'.
+#
+#   curl -fsSL .../install.sh | sh -s -- --direct --allow nodekey:… --music
+#
 # Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
@@ -121,14 +133,14 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=0763401484b27a67cedee5733a37e4809dc6e05e48eca5a0ccd1bccd2f837c8e
-SUM_linux_arm64=656f92e32c0e17117296ea52226a983288cc37c8e0ee5ee1e423f9ee89cea561
-SUM_linux_arm=3ff7fed1a471a80c60840879956de4a941bff41155dea471ad8aec4fb9c06b7b
-SUM_darwin_amd64=3a80e3d2e7fbcb07cc8288057ab9f1c78760093ff1ada9a3fb68d76746f5c7e5
-SUM_darwin_arm64=a90ad7c3834b6fbc9bd5bc1a9bd9c6b9daba8dbc8fc5062b5d65ac05466222db
-SUM_freebsd_amd64=041b7a826ce89ccb18b227a63ed517ccb71422c083a6937924223d10cf2bdb73
-SUM_freebsd_arm64=f57bd90b16201006490d09434a6726b640e0f0a7530c60022641c5b8758502c7
-SUM_android_arm64=7b482c0c5d18169c851bc8a8946469f74f67bb81a3f9a25d5c867bba2269b1fa
+SUM_linux_amd64=7deb5e989e6f313edfae461742c122a8cd3f773d624298d494577cec0b4e09e0
+SUM_linux_arm64=ab12936b11dcf1682be6ff572798604a080810f6cdfba119ca797c067667ebeb
+SUM_linux_arm=32668159f2c21527c52373e46954f5a3ddafe205bb0a79b8959a6ca6923d0280
+SUM_darwin_amd64=5885207d6641f07d12cfb25e67d145c38888d5871ab9a3bc5bb3f3152a63869a
+SUM_darwin_arm64=463efb51a8d9e7937ff7c36ba068dde9309356047e5fb7692f14a6958507e7d8
+SUM_freebsd_amd64=f2bc59451de5e68437f97783c0f117293247b2db4e1d03a733ce27afbdfb61c3
+SUM_freebsd_arm64=208bbf45fba7c0cf5a67f1fc0695d0da5aabbcf6c90a4d71ae5b6d52309d8a73
+SUM_android_arm64=e5257ab9a4aaf2bf66f09a2584ba395226837ead01262fe11a157c7a5519ef0a
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -404,6 +416,11 @@ DERPMAP_ARG="${MON_DERPMAP:-}"
 # The self-hosted page's pairing token (helper/go/pairing.go): for the last
 # --allow key on the line, the browser that made it.
 PAIR_ARG=""
+# Music (go/music.go): whether this machine shares its music with the
+# browsers on its allowlist, and the folders it shares. Folders are kept one
+# to a line, since a path may hold spaces.
+MUSIC_ARG=""
+MUSIC_DIRS=""
 # A second helper on a machine that already runs one under ANOTHER user.
 # Refused by default — see the guard below the switches for why.
 SECOND_ARG="${MON_SECOND:-}"
@@ -419,6 +436,13 @@ while [ $# -gt 0 ]; do
       --derpmap=*) DERPMAP_ARG=${1#--derpmap=}; shift ;;
       --pair) [ $# -ge 2 ] || die "--pair needs a pairing token"; PAIR_ARG=$2; shift 2 ;;
       --pair=*) PAIR_ARG=${1#--pair=}; shift ;;
+      --music) MUSIC_ARG=on; shift ;;
+      --music=on|--music=yes|--music=1) MUSIC_ARG=on; shift ;;
+      --music=off|--music=no|--music=0) MUSIC_ARG=off; shift ;;
+      --music-dir) [ $# -ge 2 ] || die "--music-dir needs a folder"; MUSIC_ARG=on; MUSIC_DIRS="$MUSIC_DIRS
+$2"; shift 2 ;;
+      --music-dir=*) MUSIC_ARG=on; MUSIC_DIRS="$MUSIC_DIRS
+${1#--music-dir=}"; shift ;;
       --name) [ $# -ge 2 ] || die "--name needs a value"; NAME_ARG=$2; shift 2 ;;
       --name=*) NAME_ARG=${1#--name=}; shift ;;
       --console) CONSOLE_ARG=on; shift ;;
@@ -461,10 +485,15 @@ DIRECT_ON=no
 # the tunnel never consults is a switch that looks set.
 if [ -z "$TOKEN" ] && [ "$DIRECT_ON" != yes ]; then
     die "no token and no --direct. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update] [--auto-update] [--diagnostics] [--sessions-sync] [--second]
-       sh install.sh --direct --allow nodekey:... [--pair TOKEN] [--derpmap https://...]  (no account needed)"
+       sh install.sh --direct --allow nodekey:... [--pair TOKEN] [--derpmap https://...] [--music [--music-dir FOLDER]]  (no account needed)"
 fi
 if [ -n "$ALLOW_KEYS" ] && [ "$DIRECT_ON" != yes ]; then
     die "--allow needs --direct (or a machine where direct mode is already on)"
+fi
+# Music is played over the direct tunnel alone — the tailnet or tailcat, never
+# the relay — so a machine without one would share it with nobody.
+if [ "$MUSIC_ARG" = on ] && [ "$DIRECT_ON" != yes ]; then
+    die "--music needs --direct (or a machine where direct mode is already on): music is played over the tailnet or the tailcat tunnel only, never through the relay"
 fi
 # A tailcat node key is 'nodekey:' and 64 hex characters, nothing else. Each
 # one is written into the allowed-clients file the helper reads on every
@@ -1022,6 +1051,25 @@ fi
 # would arrive at the relay as a brand new one after each restart. Creating it
 # here means the ordinary path never needs a runtime write at all.
 "$BINDIR/$NAME" name >/dev/null 2>&1 || true
+
+# Music: the helper writes its own settings file (music.json, owner-only), so
+# the folder list is checked by the program that will read it. A folder that
+# is not there is said and skipped, not a failed install: the rest of the line
+# has already been applied.
+case "$MUSIC_ARG" in
+  on)
+    set --
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        case "$d" in "~") d=$HOME ;; "~/"*) d="$HOME/${d#\~/}" ;; esac
+        set -- "$@" "$d"
+    done <<MUSIC_EOF
+$MUSIC_DIRS
+MUSIC_EOF
+    "$BINDIR/$NAME" music on "$@" >/dev/null || say "warning: music was not switched on; see:  $BINDIR/$NAME music" ;;
+  off)
+    "$BINDIR/$NAME" music off >/dev/null || say "warning: music could not be switched off; see:  $BINDIR/$NAME music" ;;
+esac
 
 # ------------------------------------------------------------- supervision
 # Is there a service manager on this machine, or only something that answers
@@ -1623,4 +1671,15 @@ if [ -f "$conf/sessions-sync" ]; then
 else
     say "session archive: off. Turn it on with:  $BINDIR/$NAME sessions sync on"
 fi
+# Music, said on every install when it is on: what the browsers on the
+# allowlist can play from here is something the person here should know.
+mus=""
+[ -f "$conf/music.json" ] && mus=$("$BINDIR/$NAME" music 2>/dev/null || true)
+case "$mus" in
+  on*)
+    say "music:          ON — the browsers on the direct allowlist can play what is shared,"
+    say "                over the tailnet or the tailcat tunnel only:"
+    printf '%s\n' "$mus" | sed -n 's/^  /                  /p'
+    say "                off with:  $BINDIR/$NAME music off" ;;
+esac
 say "uninstall:      sh install.sh --uninstall"

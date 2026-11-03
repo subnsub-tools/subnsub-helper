@@ -552,6 +552,10 @@ func mailboxRefusal(c consoleCmd) string {
 		// Portable copies (clone.go) are enrolled and revoked over the
 		// tunnel the copy itself will use, never through the relay.
 		return "tunnel-only"
+	case "music":
+		// What music is shared, and a WebDAV password with it (music.go),
+		// travel the direct roads alone.
+		return "tunnel-only"
 	}
 	return ""
 }
@@ -664,6 +668,9 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 		quotaForceFor(c.Target)
 		wakePush()
 		return consoleResult{ID: c.ID, Kind: "refresh", Code: 0}, false
+	case "music":
+		// The shared music's roots (music.go): a pinned key, the tunnel only.
+		return runMusicCommand(c), false
 	case "myip":
 		// The page's Exit tile (myip.go): My IP's six questions, asked from
 		// this machine's own way out — or from inside the namespace the
