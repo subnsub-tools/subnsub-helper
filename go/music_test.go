@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -51,6 +52,11 @@ func musicReset(t *testing.T) {
 	musicArtLRU.Unlock()
 	t.Setenv(musicEnvVar, "")
 	os.Unsetenv(musicEnvVar)
+	// The console's grant shares by itself (musicOnConf): off unless a test
+	// turns it on, whatever the developer's own environment says.
+	t.Setenv(consoleEnvVar, "")
+	os.Unsetenv(consoleEnvVar)
+	musicDefaultForget()
 	musicIndexBudget = 0
 	t.Cleanup(func() { musicIndexBudget = 0 })
 }
@@ -624,6 +630,314 @@ func TestMusicDavURLs(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("relOf(%s) = %q, want %q", href, got, want)
+		}
+	}
+}
+
+// The console's grant: a machine that runs a pinned dashboard's lines shares
+// its Music folder without `music on`, and `music off` still wins.
+func TestMusicOnByTheConsole(t *testing.T) {
+	f := newMusicFixture(t)
+	pub, _, _ := ed25519.GenerateKey(nil)
+	status := func() (musicStatusBody, *httptest.ResponseRecorder) {
+		var st musicStatusBody
+		rec := f.get(t, "/v1/music", &f.peer)
+		if rec.Code == http.StatusOK {
+			musicBody(t, rec, &st)
+		}
+		return st, rec
+	}
+	if musicOn() {
+		t.Fatal("nothing switched on, no console: off")
+	}
+	t.Setenv(consoleEnvVar, "1")
+	if musicOn() {
+		t.Fatal("the console with no key pinned grants nothing")
+	}
+	if err := trustKey(base64.StdEncoding.EncodeToString(pub)); err != nil {
+		t.Fatal(err)
+	}
+	if !musicOn() {
+		t.Fatal("the console and a pinned key: on")
+	}
+	musicSettle(t)
+	st, rec := status()
+	if rec.Code != 200 || len(st.Roots) != 1 || st.Roots[0].Where != "~/Music" || st.Roots[0].ID != musicAutoID(f.music) || st.Roots[0].Tracks != 3 {
+		t.Fatalf("the Music folder, shared by itself: %d %+v", rec.Code, st)
+	}
+	if !containsStr(st.CanAdd, "dir") || !containsStr(st.CanAdd, "webdav") {
+		t.Fatalf("this machine's folders may be added from the page: %v", st.CanAdd)
+	}
+	if _, err := os.Stat(musicConfPath()); err == nil {
+		t.Fatal("nothing is written down until something is chosen")
+	}
+	var hello transport.Hello
+	fr, _ := transport.Decode(f.get(t, "/v1/hello", &f.peer).Body.Bytes())
+	json.Unmarshal(fr.Body, &hello)
+	if !containsStr(hello.Caps, transport.CapMusic) {
+		t.Fatalf("the hello names music: %v", hello.Caps)
+	}
+	// Off at the keyboard wins; on again brings the same folder back.
+	runMusicCLI([]string{"off"})
+	if _, rec := status(); rec.Code != http.StatusNotFound || errCode(t, rec) != "music-off" {
+		t.Fatalf("music off beats the console: %d", rec.Code)
+	}
+	runMusicCLI([]string{"on"})
+	musicSettle(t)
+	if st, _ := status(); len(st.Roots) != 1 || st.Roots[0].ID != musicAutoID(f.music) {
+		t.Fatalf("on again: %+v", st.Roots)
+	}
+	// The console off again: music stays on, since it was switched on here.
+	t.Setenv(consoleEnvVar, "0")
+	if st, rec := status(); rec.Code != 200 || containsStr(st.CanAdd, "dir") {
+		t.Fatalf("switched on at the keyboard, without the console: %d %+v", rec.Code, st.CanAdd)
+	}
+}
+
+// Without the console, the first folder added at the keyboard is the only
+// one shared, as before: the Music folder is not written down beside it.
+func TestMusicAddAtTheKeyboardWithoutTheConsole(t *testing.T) {
+	f := newMusicFixture(t)
+	other := filepath.Join(f.home, "Private")
+	runMusicCLI([]string{"add", other})
+	c := loadMusicConf()
+	if len(c.Roots) != 1 || c.Roots[0].Path != other || musicOnConf(c) {
+		t.Fatalf("one folder, music still off: %+v", c)
+	}
+}
+
+// A music.json from before the console's grant that says off stays off: it
+// may be 'music off' at the keyboard, which nothing from a page undoes.
+func TestMusicOffFromBeforeTheGrantStaysOff(t *testing.T) {
+	f := newMusicFixture(t)
+	pub, _, _ := ed25519.GenerateKey(nil)
+	if err := trustKey(base64.StdEncoding.EncodeToString(pub)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(consoleEnvVar, "1")
+	id := musicAutoID("before")
+	write := func(on bool) {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"v": 1, "on": on, "roots": []map[string]string{{"id": id, "kind": "dir", "path": f.music}}})
+		if err := os.MkdirAll(filepath.Dir(musicConfPath()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(musicConfPath(), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		musicConfCache.Lock()
+		musicConfCache.ok = false
+		musicConfCache.Unlock()
+	}
+	write(false)
+	if c := loadMusicConf(); musicOn() || !c.Off || !c.Set {
+		t.Fatalf("off before the grant, off now: %+v", c)
+	}
+	write(true)
+	if c := loadMusicConf(); !musicOn() || c.Off || len(musicRoots(c)) != 1 || musicRoots(c)[0].ID != id {
+		t.Fatalf("on before the grant, its folders as they were: %+v", c)
+	}
+}
+
+// Links, as the walk sees them: a folder reached through a link inside a
+// shared one is not shared by it (musicWalkDir does not follow it there), a
+// shared folder that is a link is shared where it leads, and a link to the
+// whole system is the whole system.
+func TestMusicAddDirThroughLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("links need a privilege on Windows")
+	}
+	f := newMusicFixture(t)
+	pub, _, _ := ed25519.GenerateKey(nil)
+	if err := trustKey(base64.StdEncoding.EncodeToString(pub)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(consoleEnvVar, "1")
+	cmd := func(op string, arg any) consoleResult {
+		b, _ := json.Marshal(arg)
+		return runMusicCommand(consoleCmd{ID: "l" + op, Kind: "music", Target: op, Cmd: string(b)})
+	}
+	outside := filepath.Join(t.TempDir(), "Library")
+	writeFile(t, filepath.Join(outside, "Disk", "Track.wav"), []byte("RIFF0000WAVE"))
+	shelf := filepath.Join(f.music, "Shelf")
+	if err := os.Symlink(outside, shelf); err != nil {
+		t.Fatal(err)
+	}
+	r := cmd("browse", map[string]string{"path": shelf})
+	var b musicBrowseBody
+	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &b) != nil || b.Shared != "" || strings.Join(b.Dirs, ",") != "Disk" {
+		t.Fatalf("through a link inside the Music folder, not shared by it: %+v %+v", r, b)
+	}
+	if r = cmd("add-dir", map[string]string{"path": shelf}); r.Code != 0 {
+		t.Fatalf("shared where it leads: %+v", r)
+	}
+	c := loadMusicConf()
+	if len(c.Roots) != 2 || c.Roots[0].ID != musicAutoID(f.music) || c.Roots[1].Path != shelf {
+		t.Fatalf("beside the Music folder: %+v", c.Roots)
+	}
+	if r := cmd("add-dir", map[string]string{"path": filepath.Join(outside, "Disk")}); r.Error != "already-shared" || r.Out != c.Roots[1].ID {
+		t.Fatalf("inside the linked folder by its own name: %+v", r)
+	}
+	// Home around both: the Music folder goes, the linked one stays, its
+	// tracks not being under home as the walk goes.
+	if r := cmd("add-dir", map[string]string{"path": f.home}); r.Code != 0 {
+		t.Fatalf("home: %+v", r)
+	}
+	if c = loadMusicConf(); len(c.Roots) != 2 || c.Roots[0].Path != shelf || c.Roots[1].Path != f.home {
+		t.Fatalf("home in place of the Music folder only: %+v", c.Roots)
+	}
+	everything := filepath.Join(t.TempDir(), "everything")
+	if err := os.Symlink("/", everything); err != nil {
+		t.Fatal(err)
+	}
+	if r := cmd("add-dir", map[string]string{"path": everything}); r.Error != "too-broad" {
+		t.Fatalf("a link to the whole system: %+v", r)
+	}
+}
+
+func TestMusicBrowseAndAddDir(t *testing.T) {
+	f := newMusicFixture(t)
+	pub, _, _ := ed25519.GenerateKey(nil)
+	if err := trustKey(base64.StdEncoding.EncodeToString(pub)); err != nil {
+		t.Fatal(err)
+	}
+	cmd := func(op string, arg any) consoleResult {
+		b, _ := json.Marshal(arg)
+		return runMusicCommand(consoleCmd{ID: "m" + op, Kind: "music", Target: op, Cmd: string(b)})
+	}
+	browse := func(p string) musicBrowseBody {
+		t.Helper()
+		r := cmd("browse", map[string]string{"path": p})
+		if r.Code != 0 {
+			t.Fatalf("browse %q: %+v", p, r)
+		}
+		var b musicBrowseBody
+		if err := json.Unmarshal([]byte(r.Out), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	// Music switched on at the keyboard, the console off: no looking.
+	runMusicCLI([]string{"on"})
+	for _, op := range []string{"browse", "add-dir"} {
+		if r := cmd(op, map[string]string{"path": f.home}); r.Error != "console-off" {
+			t.Fatalf("%s without the console: %+v", op, r)
+		}
+	}
+	// A machine whose music nobody switched on, with the console on.
+	os.Remove(musicConfPath())
+	t.Setenv(consoleEnvVar, "1")
+	musicSettle(t)
+
+	places := browse("")
+	kinds := map[string]string{}
+	for _, pl := range places.Places {
+		kinds[pl.K] = pl.P
+	}
+	if kinds["music"] != f.music || kinds["home"] != f.home || places.Path != "" {
+		t.Fatalf("the places: %+v", places)
+	}
+	if runtime.GOOS != "windows" && kinds["root"] != "/" {
+		t.Fatalf("the whole tree is a place: %+v", places.Places)
+	}
+	if _, ok := kinds["downloads"]; ok {
+		t.Fatal("a Downloads folder that is not there is not a place")
+	}
+	home := browse(f.home)
+	if strings.Join(home.Dirs, ",") != "Music,Private" || home.Parent != filepath.Dir(f.home) || home.Shared != "" || home.Audio != 0 {
+		t.Fatalf("home: %+v", home)
+	}
+	music := browse(f.music)
+	if strings.Join(music.Dirs, ",") != "Band,Other" || music.Shared != musicAutoID(f.music) {
+		t.Fatalf("hidden and NAS folders are not listed, and the shared folder says so: %+v", music)
+	}
+	album := browse(filepath.Join(f.music, "Band", "Album"))
+	if album.Audio != 2 || strings.Join(album.Names, ",") != "01 First.mp3,02 Second.mp3" || len(album.Dirs) != 0 || album.Shared != musicAutoID(f.music) {
+		t.Fatalf("an album: %+v", album)
+	}
+	for p, want := range map[string]string{"relative/path": "bad-path", filepath.Join(f.home, "nope"): "missing", filepath.Join(f.music, "Other", "notes.txt"): "not-a-folder"} {
+		if r := cmd("browse", map[string]string{"path": p}); r.Error != want {
+			t.Fatalf("browse %s: %+v, want %s", p, r, want)
+		}
+	}
+
+	// Sharing another folder keeps the Music folder shared beside it, and
+	// writes both down as chosen.
+	private := filepath.Join(f.home, "Private")
+	r := cmd("add-dir", map[string]string{"path": private, "name": "Mine"})
+	if r.Code != 0 || r.Out == "" {
+		t.Fatalf("add-dir: %+v", r)
+	}
+	c := loadMusicConf()
+	if !c.Set || len(c.Roots) != 2 || c.Roots[0].ID != musicAutoID(f.music) || c.Roots[1].Path != private || c.Roots[1].Name != "Mine" {
+		t.Fatalf("written down: %+v", c)
+	}
+	musicSettle(t)
+	var st musicStatusBody
+	musicBody(t, f.get(t, "/v1/music", &f.peer), &st)
+	if len(st.Roots) != 2 || st.Roots[1].Name != "Mine" || st.Roots[1].Tracks != 1 {
+		t.Fatalf("status: %+v", st.Roots)
+	}
+	if r := cmd("add-dir", map[string]string{"path": filepath.Join(f.music, "Band")}); r.Error != "already-shared" || r.Out != musicAutoID(f.music) {
+		t.Fatalf("a folder inside a shared one: %+v", r)
+	}
+	for p, want := range map[string]string{"relative": "bad-path", filepath.Join(f.home, "nope"): "missing", filepath.Join(f.music, "Other", "notes.txt"): "not-a-folder"} {
+		if r := cmd("add-dir", map[string]string{"path": p}); r.Error != want {
+			t.Fatalf("add-dir %s: %+v, want %s", p, r, want)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		for _, p := range []string{"/", "/proc", "/sys/kernel"} {
+			if r := cmd("add-dir", map[string]string{"path": p}); r.Error != "too-broad" {
+				t.Fatalf("add-dir %s: %+v", p, r)
+			}
+		}
+	}
+	// A folder around the shared ones takes their place.
+	r = cmd("add-dir", map[string]string{"path": f.home})
+	if r.Code != 0 {
+		t.Fatalf("home: %+v", r)
+	}
+	c = loadMusicConf()
+	if len(c.Roots) != 1 || c.Roots[0].Path != f.home {
+		t.Fatalf("home in place of the two inside it: %+v", c.Roots)
+	}
+	// Taking the last one away leaves nothing shared: the Music folder does
+	// not come back by itself once something was chosen.
+	if r := cmd("remove", map[string]string{"id": c.Roots[0].ID}); r.Code != 0 {
+		t.Fatalf("remove: %+v", r)
+	}
+	musicSettle(t)
+	musicBody(t, f.get(t, "/v1/music", &f.peer), &st)
+	if len(st.Roots) != 0 {
+		t.Fatalf("nothing shared: %+v", st.Roots)
+	}
+	// The Music folder shared by itself can be taken away too, and stays away.
+	os.Remove(musicConfPath())
+	musicSettle(t)
+	if r := cmd("remove", map[string]string{"id": musicAutoID(f.music)}); r.Code != 0 {
+		t.Fatalf("remove the Music folder: %+v", r)
+	}
+	if c := loadMusicConf(); !c.Set || len(c.Roots) != 0 || len(musicRoots(c)) != 0 {
+		t.Fatalf("chosen, empty: %+v", c)
+	}
+}
+
+func TestMusicPathWithin(t *testing.T) {
+	sep := string(filepath.Separator)
+	a := filepath.Join(sep+"x", "Music")
+	for _, c := range []struct {
+		p, dir string
+		want   bool
+	}{
+		{a, a, true},
+		{filepath.Join(a, "Band"), a, true},
+		{a + "2", a, false},
+		{filepath.Dir(a), a, false},
+		{filepath.Join(sep+"y", "Music"), a, false},
+	} {
+		if got := musicPathWithin(c.p, c.dir); got != c.want {
+			t.Fatalf("musicPathWithin(%q, %q) = %v", c.p, c.dir, got)
 		}
 	}
 }

@@ -2,12 +2,25 @@ package main
 
 // music.go — this machine's music, shared with the browsers on its allowlist.
 //
-// What is shared is the operator's choice, made here: `subnsub-monitor music
-// on` (or --music on the install line) shares this account's Music folder,
-// `music add <dir>` another one. A dashboard whose key this machine has
-// pinned may add WebDAV folders (musicdav.go) and take any root away, but it
-// cannot name a local folder: which of this machine's files may be read is
-// decided at its keyboard.
+// What is shared, and who decides:
+//
+//   - A machine whose console is on (console.go) and which has pinned a
+//     dashboard key shares without being asked. That dashboard may already
+//     run any line here as this account, so every file the account can read
+//     is already its to read, and holding the music back behind a second
+//     switch would be theatre — update.go makes the same argument for
+//     updates (user request, 2026-11-04: every machine whose helper takes
+//     remote commands should reach its disk's files by itself). There, until
+//     somebody chooses otherwise, this account's Music folder is shared, and
+//     the dashboard may look through the machine's folders and share any of
+//     them (browse, add-dir).
+//   - Elsewhere it is the operator's choice, made here: `subnsub-monitor
+//     music on` (or --music on the install line) shares the Music folder,
+//     `music add <dir>` another one. A dashboard whose key this machine has
+//     pinned may add WebDAV folders (musicdav.go) and take any root away, but
+//     it cannot look through or name a local folder: which of this machine's
+//     files may be read is decided at its keyboard.
+//   - `music off` at the keyboard, or MON_MUSIC=off, wins over both.
 //
 // The roads are the direct ones alone — the tailnet road and the tailcat
 // tunnel (direct.go, tailnet.go). The relay never carries a byte of it: no
@@ -23,12 +36,16 @@ package main
 // walk below put it there — so no request names a file the walk did not find,
 // and the local reads go through os.Root besides, which refuses a path that
 // would leave the folder. Only audio files are indexed; the cover route also
-// reads the folder images the walk noted beside them, and nothing else.
+// reads the folder images the walk noted beside them, and nothing else. The
+// folder listing a page looks through comes only in answer to a signed
+// command (browse), never to a GET: a key on the allowlist may watch and
+// listen, and only a pinned key on a machine with the console on may look.
 
 import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -102,6 +119,14 @@ type musicRootConf struct {
 type musicConf struct {
 	V  int  `json:"v"`
 	On bool `json:"on"`
+	// Off is `music off`, typed at the keyboard: it wins over the console's
+	// grant, which otherwise shares by itself (musicOnConf).
+	Off bool `json:"off,omitempty"`
+	// Set says the list of folders was chosen, at the keyboard or from a
+	// page, rather than left as it came: until then a machine whose music is
+	// on shares its Music folder (musicRoots). A file from before the field
+	// (v1) was only ever written by a choice.
+	Set bool `json:"set,omitempty"`
 	// A rescan asked for at the keyboard: the running helper is another
 	// process, and a newer stamp here is how it hears.
 	Rescan int64           `json:"rescan,omitempty"`
@@ -147,6 +172,13 @@ func loadMusicConf() musicConf {
 		// default worth having.
 		c = musicConf{}
 	}
+	if c.V == 1 {
+		// Written before the console's grant, when off was all that "on":
+		// false could say. It may have been 'music off' at the keyboard,
+		// which nothing from a page undoes, so it is kept as that.
+		c.Set = true
+		c.Off = c.Off || !c.On
+	}
 	c.Roots = cleanMusicRoots(c.Roots)
 	musicConfCache.mod, musicConfCache.size, musicConfCache.conf, musicConfCache.ok = fi.ModTime(), fi.Size(), c, true
 	return c
@@ -185,7 +217,7 @@ func saveMusicConf(c musicConf) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
-	c.V = 1
+	c.V = 2
 	if c.Roots == nil {
 		c.Roots = []musicRootConf{}
 	}
@@ -214,12 +246,120 @@ func musicEnvOff() bool {
 	return false
 }
 
-// musicOn says whether this machine shares music right now.
-func musicOn() bool {
-	if musicEnvOff() {
+// musicByConsole is the console's grant: commands from a pinned dashboard
+// key, which may already read whatever this account can (see the top of this
+// file). The console is not taken without a pinned key on the tunnel either
+// (direct.go), so a machine with nothing pinned has no such grant.
+func musicByConsole() bool {
+	return consoleEnabled() && loadTrust().sealed
+}
+
+// musicOnConf says whether this configuration shares music right now.
+func musicOnConf(c musicConf) bool {
+	if musicEnvOff() || c.Off {
 		return false
 	}
-	return loadMusicConf().On
+	return c.On || musicByConsole()
+}
+
+// musicOn says whether this machine shares music right now.
+func musicOn() bool {
+	return musicOnConf(loadMusicConf())
+}
+
+// musicRoots is what the configuration shares: the folders as chosen, or —
+// while nobody has chosen any — this account's Music folder, under an id that
+// is the same every time it is worked out, so its index outlives a restart.
+func musicRoots(c musicConf) []musicRootConf {
+	if c.Set || len(c.Roots) > 0 {
+		return c.Roots
+	}
+	if d := musicDefaultCached(); d != "" {
+		return []musicRootConf{{ID: musicAutoID(d), Kind: "dir", Path: d}}
+	}
+	return nil
+}
+
+func musicAutoID(p string) string {
+	h := sha256.Sum256([]byte("music-folder\n" + p))
+	return hex.EncodeToString(h[:6])
+}
+
+// musicChosen makes the list as it stands the chosen one, before a change is
+// made to it: the Music folder shared while nothing was chosen stays shared
+// beside the folder added, and stays gone once it is taken away. The folder
+// is written down only where it was shared — a machine with music off adding
+// its first folder at the keyboard shares that folder alone, as before.
+func musicChosen(c *musicConf) {
+	if !c.Set && len(c.Roots) == 0 && musicOnConf(*c) {
+		c.Roots = append([]musicRootConf(nil), musicRoots(*c)...)
+	}
+	c.Set = true
+}
+
+// The Music folder, looked for again at most once a minute, and never with
+// anybody waiting on it for long: musicRoots runs on every music request with
+// the library held, and a Music folder on a network mount whose server went
+// away blocks a stat for as long as the kernel cares to wait. The first look
+// waits a moment for its answer; later ones take the last answer while the
+// next is found in the background.
+const musicDefaultWait = 2 * time.Second
+
+var musicDefaultMemo struct {
+	sync.Mutex
+	at      time.Time     // when the last answer came; zero before the first
+	dir     string        // the last answer
+	looking chan struct{} // the look under way, closed when it is done
+	gaveUp  bool          // the first look outlasted musicDefaultWait
+	gen     int
+}
+
+func musicDefaultCached() string {
+	m := &musicDefaultMemo
+	m.Lock()
+	if !m.at.IsZero() && time.Since(m.at) <= time.Minute {
+		d := m.dir
+		m.Unlock()
+		return d
+	}
+	if m.looking == nil {
+		done, gen := make(chan struct{}), m.gen
+		m.looking = done
+		go func() {
+			d := musicDefaultDir()
+			m.Lock()
+			if m.gen == gen {
+				m.dir, m.at, m.looking, m.gaveUp = d, time.Now(), nil, false
+			}
+			m.Unlock()
+			close(done)
+		}()
+	}
+	done, d, wait := m.looking, m.dir, m.at.IsZero() && !m.gaveUp
+	m.Unlock()
+	if !wait {
+		return d
+	}
+	select {
+	case <-done:
+	case <-time.After(musicDefaultWait):
+		m.Lock()
+		m.gaveUp = true
+		m.Unlock()
+		return ""
+	}
+	m.Lock()
+	defer m.Unlock()
+	return m.dir
+}
+
+// musicDefaultForget drops the answer, for a test with another home.
+func musicDefaultForget() {
+	m := &musicDefaultMemo
+	m.Lock()
+	m.at, m.dir, m.looking, m.gaveUp = time.Time{}, "", nil, false
+	m.gen++
+	m.Unlock()
 }
 
 func musicNewID() string {
@@ -454,7 +594,11 @@ func musicSave() {
 // added, removed or changed since the last look.
 func musicReconcile() {
 	c := loadMusicConf()
-	on := c.On && !musicEnvOff()
+	on := musicOnConf(c)
+	var roots []musicRootConf
+	if on {
+		roots = musicRoots(c) // before the library is held: it may look at the disk
+	}
 	musicLib.Lock()
 	defer musicLib.Unlock()
 	if !musicLib.loaded {
@@ -464,7 +608,7 @@ func musicReconcile() {
 	want := map[string]musicRootConf{}
 	order := []string{}
 	if on {
-		for _, r := range c.Roots {
+		for _, r := range roots {
 			want[r.ID] = r
 			order = append(order, r.ID)
 		}
@@ -867,7 +1011,8 @@ type musicStatusBody struct {
 	On      bool            `json:"on"`
 	Roots   []musicRootView `json:"roots"`
 	ReadMax int             `json:"read_max"`
-	// What a dashboard may change here: WebDAV folders, with a pinned key.
+	// What a dashboard may add here: WebDAV folders, with a pinned key, and
+	// this machine's own folders where the console is on as well ("dir").
 	CanAdd []string `json:"can_add"`
 }
 
@@ -931,6 +1076,9 @@ func (h *directHandler) musicStatus(w http.ResponseWriter, r *http.Request) {
 	body := musicStatusBody{On: true, Roots: []musicRootView{}, ReadMax: musicReadMax, CanAdd: []string{}}
 	if loadTrust().sealed {
 		body.CanAdd = append(body.CanAdd, "webdav")
+		if musicByConsole() {
+			body.CanAdd = append(body.CanAdd, "dir")
+		}
 	}
 	musicLib.Lock()
 	for _, id := range musicLib.order {
@@ -1375,8 +1523,10 @@ func musicDownscale(src image.Image, px int) *image.RGBA {
 //	add-webdav  {"url","user","pass","name","pin"}  → out: the new root's id
 //	remove      {"id"}
 //	rescan      {"id"} (or {} for every root)
+//	browse      {"path"} ("" for the places)  → out: a folder's listing (musicBrowseBody)
+//	add-dir     {"path","name"}               → out: the new root's id
 //
-// A local folder cannot be added this way: see the top of this file.
+// The last two only where the console is on: see the top of this file.
 //
 // musicConfMu serialises this process's changes to music.json: the WebDAV
 // probe takes seconds, and the configuration is read again after it.
@@ -1394,6 +1544,7 @@ func runMusicCommand(c consoleCmd) consoleResult {
 	}
 	var arg struct {
 		ID   string `json:"id"`
+		Path string `json:"path"`
 		URL  string `json:"url"`
 		User string `json:"user"`
 		Pass string `json:"pass"`
@@ -1437,10 +1588,11 @@ func runMusicCommand(c consoleCmd) consoleResult {
 		musicConfMu.Lock()
 		defer musicConfMu.Unlock()
 		conf = loadMusicConf()
-		if !conf.On || musicEnvOff() {
+		if !musicOnConf(conf) {
 			res.Error = "music-off"
 			return res
 		}
+		musicChosen(&conf)
 		if len(conf.Roots) >= musicRootsMax {
 			res.Error = "too-many"
 			return res
@@ -1464,6 +1616,7 @@ func runMusicCommand(c consoleCmd) consoleResult {
 		musicConfMu.Lock()
 		defer musicConfMu.Unlock()
 		conf = loadMusicConf()
+		musicChosen(&conf)
 		kept := conf.Roots[:0:0]
 		found := false
 		for _, r := range conf.Roots {
@@ -1483,6 +1636,98 @@ func runMusicCommand(c consoleCmd) consoleResult {
 			return res
 		}
 		res.Code = 0
+	case "browse":
+		if !musicByConsole() {
+			res.Error = "console-off"
+			return res
+		}
+		body, code := musicBrowseWithin(arg.Path, musicBrowseWait)
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		b, err := json.Marshal(body)
+		if err != nil {
+			res.Error = "unavailable"
+			return res
+		}
+		res.Code, res.Out = 0, string(b)
+		// Nothing changed: no reconcile, no wake.
+		return res
+	case "add-dir":
+		if !musicByConsole() {
+			res.Error = "console-off"
+			return res
+		}
+		if len(arg.Name) > 120 {
+			res.Error = "bad-args"
+			return res
+		}
+		// The folder is looked at on the clock browse runs on, and so are
+		// the folders shared now, for where their links lead: the command
+		// gate is held while this runs, and any of them may sit on a disk
+		// that went away.
+		type dirPlan struct {
+			p, real string
+			reals   map[string]string
+		}
+		plan, code := musicWithin(musicBrowseWait, func() (dirPlan, string) {
+			p, real, code := musicDirArg(arg.Path)
+			if code != "" {
+				return dirPlan{}, code
+			}
+			pl := dirPlan{p: p, real: real, reals: map[string]string{}}
+			for _, r := range musicRoots(loadMusicConf()) {
+				if r.Kind == "dir" {
+					pl.reals[r.Path] = musicReal(r.Path)
+				}
+			}
+			return pl, ""
+		})
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		realOf := func(p string) string {
+			if r, ok := plan.reals[p]; ok {
+				return r
+			}
+			return p
+		}
+		musicConfMu.Lock()
+		defer musicConfMu.Unlock()
+		conf = loadMusicConf()
+		if !musicOnConf(conf) {
+			res.Error = "music-off"
+			return res
+		}
+		musicChosen(&conf)
+		// A folder inside one already shared would list its tracks twice;
+		// one around folders already shared takes their place. Both as the
+		// walk sees them: it does not follow a link to a folder inside a
+		// shared one, and it follows a shared folder that is a link.
+		kept := conf.Roots[:0:0]
+		for _, r := range conf.Roots {
+			if r.Kind == "dir" && (r.Path == plan.p || musicPathWithin(plan.real, realOf(r.Path))) {
+				res.Error, res.Out = "already-shared", r.ID
+				return res
+			}
+			if r.Kind == "dir" && musicPathWithin(realOf(r.Path), plan.real) {
+				continue
+			}
+			kept = append(kept, r)
+		}
+		if len(kept) >= musicRootsMax {
+			res.Error = "too-many"
+			return res
+		}
+		r := musicRootConf{ID: musicNewID(), Kind: "dir", Path: plan.p, Name: cleanTag(arg.Name)}
+		conf.Roots = append(kept, r)
+		if err := saveMusicConf(conf); err != nil {
+			res.Error = "save-failed"
+			return res
+		}
+		res.Code, res.Out = 0, r.ID
 	case "rescan":
 		musicReconcile()
 		musicLib.Lock()
@@ -1523,7 +1768,7 @@ func runMusicCLI(args []string) int {
 		}
 		return -1
 	}
-	addDir := func(p string) bool {
+	addDir := func(p string, id ...string) bool {
 		abs, err := filepath.Abs(p)
 		if err != nil {
 			warnf("%s: %v", p, err)
@@ -1544,17 +1789,24 @@ func runMusicCLI(args []string) int {
 			warnf("at most %d folders can be shared", musicRootsMax)
 			return false
 		}
-		conf.Roots = append(conf.Roots, musicRootConf{ID: musicNewID(), Kind: "dir", Path: abs})
+		rid := musicNewID()
+		if len(id) > 0 && id[0] != "" {
+			rid = id[0]
+		}
+		conf.Roots = append(conf.Roots, musicRootConf{ID: rid, Kind: "dir", Path: abs})
 		fmt.Printf("sharing %s\n", homeTilde(abs))
 		return true
 	}
 	switch verb {
 	case "", "status":
 	case "on":
-		conf.On = true
+		musicChosen(&conf)
+		conf.On, conf.Off = true, false
 		if len(args) == 0 && len(conf.Roots) == 0 {
+			// Under the id it has when the console shares it, so its index
+			// is the same one either way.
 			if d := musicDefaultDir(); d != "" {
-				addDir(d)
+				addDir(d, musicAutoID(d))
 			} else {
 				fmt.Println("no Music folder found here; add one with 'subnsub-monitor music add <folder>'")
 			}
@@ -1568,21 +1820,25 @@ func runMusicCLI(args []string) int {
 			return rc
 		}
 	case "off":
-		conf.On = false
+		conf.On, conf.Off = false, true
 		if rc := save(); rc >= 0 {
 			return rc
+		}
+		if musicByConsole() {
+			fmt.Println("note: the console is on, so a dashboard could switch it back on through a line; 'console off' is what takes that away")
 		}
 	case "add":
 		if len(args) == 0 {
 			warnf("say 'music add <folder>'")
 			return 2
 		}
+		musicChosen(&conf)
 		for _, a := range args {
 			if !addDir(a) {
 				return 1
 			}
 		}
-		if !conf.On {
+		if !musicOnConf(conf) {
 			fmt.Println("note: music is off; 'subnsub-monitor music on' shares what is listed")
 		}
 		if rc := save(); rc >= 0 {
@@ -1597,6 +1853,7 @@ func runMusicCLI(args []string) int {
 		}
 		want := args[0]
 		abs, _ := filepath.Abs(want)
+		musicChosen(&conf)
 		kept := conf.Roots[:0:0]
 		for _, r := range conf.Roots {
 			if r.ID == want || r.Kind == "dir" && r.Path == abs || r.Kind == "webdav" && strings.TrimSuffix(r.URL, "/") == strings.TrimSuffix(want, "/") {
@@ -1623,17 +1880,30 @@ func runMusicCLI(args []string) int {
 		warnf("usage: subnsub-monitor music [on [FOLDER...] | off | add FOLDER... | add-webdav URL [--user NAME] [--name LABEL] [--pin sha256:HEX] | remove ID | rescan]")
 		return 2
 	}
-	if conf.On && !musicEnvOff() {
+	on := musicOnConf(conf)
+	switch {
+	case on && !conf.On:
+		fmt.Printf("on   (%s) by the console: a dashboard that may run lines here may read these files anyway\n", agentID())
+	case on:
 		fmt.Printf("on   (%s)\n", agentID())
-		fmt.Println("browsers on this machine's direct allowlist can play what is listed, over the tailnet or the tailcat tunnel only")
-	} else {
+	default:
 		fmt.Printf("off  (%s)\n", agentID())
 	}
+	if on {
+		fmt.Println("browsers on this machine's direct allowlist can play what is listed, over the tailnet or the tailcat tunnel only")
+		if musicByConsole() {
+			fmt.Println("with the console on, a dashboard whose key is pinned here may also look through this machine's folders and share one")
+		}
+	}
 	saved := musicLoadSaved()
-	for _, r := range conf.Roots {
+	auto := !conf.Set && len(conf.Roots) == 0
+	for _, r := range musicRoots(conf) {
 		n := "not read yet"
 		if s := saved[r.ID]; s != nil && s.Sig == r.sig() {
 			n = fmt.Sprintf("%d tracks", len(s.Tracks))
+		}
+		if auto {
+			n += "; this account's Music folder, shared until a folder is chosen"
 		}
 		fmt.Printf("  %s  %-6s  %s  (%s)\n", r.ID, r.Kind, r.where(), n)
 	}
@@ -1697,12 +1967,13 @@ func runMusicDavCLI(conf *musicConf, args []string) int {
 		warnf("could not list that folder: %s", musicErrCode(err))
 		return 1
 	}
+	musicChosen(conf)
 	if len(conf.Roots) >= musicRootsMax {
 		warnf("at most %d folders can be shared", musicRootsMax)
 		return 1
 	}
 	conf.Roots = append(conf.Roots, musicRootConf{ID: musicNewID(), Kind: "webdav", URL: d.base.String(), User: user, Pass: pass, Pin: d.pin, Name: name})
-	if !conf.On {
+	if !musicOnConf(*conf) {
 		fmt.Println("note: music is off; 'subnsub-monitor music on' shares what is listed")
 	}
 	if err := saveMusicConf(*conf); err != nil {

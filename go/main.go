@@ -149,6 +149,13 @@ couples the two streams and forwards bytes it cannot read (they are encrypted
 between the browsers); the guest is admitted for that session only and can
 reach nothing but the pipe. 'transfer off' refuses new invites at once.
 
+music is OFF until 'music on' here, or until the console is: a machine whose
+console is on and which has pinned a dashboard key shares this account's Music
+folder by itself, and that dashboard may look through this machine's folders
+and share another, as it could read them with a line anyway. The browsers on
+the direct allowlist play it over the tailnet road or the tailcat tunnel, never
+the relay. 'music off' here wins over the console.
+
 sessions sync is OFF until you turn it on here, and it is the one switch that
 sends something OUT rather than answering a question: with it on, this machine's
 agent conversations are parsed, redacted and pushed to your account's archive,
