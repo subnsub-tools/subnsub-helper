@@ -7,7 +7,9 @@ package main
 // by name, how many audio files sit in it, and the first of their names. It is
 // read once per question, on a clock — a network mount whose server has gone
 // away blocks a directory read for as long as the kernel cares to wait, and
-// the command gate (direct.go) is held while a command runs.
+// the command gate (direct.go) is held while a command runs. Nothing is
+// listed until somebody opens it on the page, and on macOS nothing beyond
+// what was opened is touched (musicLookAhead).
 
 import (
 	"errors"
@@ -18,6 +20,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -67,35 +70,109 @@ type musicBrowseBody struct {
 // clock runs out: there is no taking back a blocked read. A few of those may
 // be left waiting on a disk that went away, and no more: past that, a
 // question is answered at once rather than with one more thread stuck in the
-// kernel.
+// kernel. The same question asked again while its look is still under way
+// waits on that look rather than starting another, and one asked again soon
+// after a look nobody waited out is answered by that look (musicLookKeep).
+//
+// A look at a folder the system guards (asks; on macOS musicGuardedLinks,
+// found out in the look, since a link may lead there) is answered sooner:
+// held up for musicAskWait, it is waiting on the person at the machine, whom
+// the system is asking whether it may be read, and the page is told so
+// ("permission-wait") and asks again; the look itself goes on, and the answer
+// it brings is the next one given.
 var musicBrowsing atomic.Int32
 
-func musicWithin[T any](wait time.Duration, look func() (T, string)) (T, string) {
+// musicAskWait: how long a look at a guarded folder may take before it is
+// taken to be waiting on the system's question.
+const musicAskWait = 1500 * time.Millisecond
+
+// musicLookKeep: how long the answer of a look nobody waited out is kept
+// for the question asked again — the page asks again every second or so.
+const musicLookKeep = 10 * time.Second
+
+type musicLook struct {
+	done   chan struct{}
+	asks   atomic.Bool // it reads a guarded folder: a hold-up is the system asking
+	v      any
+	code   string
+	doneAt time.Time // when it finished (under musicLooks); zero while it runs
+}
+
+var musicLooks = struct {
+	sync.Mutex
+	m map[string]*musicLook
+}{m: map[string]*musicLook{}}
+
+func musicWithin[T any](wait time.Duration, key string, asks func() bool, look func() (T, string)) (T, string) {
 	var zero T
-	if musicBrowsing.Add(1) > 4 {
-		musicBrowsing.Add(-1)
-		return zero, "timeout"
+	now := time.Now()
+	musicLooks.Lock()
+	for k, o := range musicLooks.m {
+		if !o.doneAt.IsZero() && now.Sub(o.doneAt) > musicLookKeep {
+			delete(musicLooks.m, k)
+		}
 	}
-	type answer struct {
-		v    T
-		code string
+	l := musicLooks.m[key]
+	if l != nil && !l.doneAt.IsZero() {
+		// Finished after the last question about it stopped waiting: its
+		// answer is this one, once.
+		delete(musicLooks.m, key)
+		musicLooks.Unlock()
+		v, _ := l.v.(T)
+		return v, l.code
 	}
-	ch := make(chan answer, 1)
-	go func() {
-		defer musicBrowsing.Add(-1)
-		v, code := look()
-		ch <- answer{v, code}
-	}()
-	select {
-	case a := <-ch:
-		return a.v, a.code
-	case <-time.After(wait):
-		return zero, "timeout"
+	if l == nil {
+		if musicBrowsing.Add(1) > 4 {
+			musicBrowsing.Add(-1)
+			musicLooks.Unlock()
+			return zero, "timeout"
+		}
+		l = &musicLook{done: make(chan struct{})}
+		musicLooks.m[key] = l
+		go func() {
+			defer musicBrowsing.Add(-1)
+			if asks != nil && asks() {
+				l.asks.Store(true)
+			}
+			v, code := look()
+			musicLooks.Lock()
+			l.v, l.code, l.doneAt = v, code, time.Now()
+			musicLooks.Unlock()
+			close(l.done)
+		}()
+	}
+	musicLooks.Unlock()
+	clock := time.NewTimer(wait)
+	defer clock.Stop()
+	var ask <-chan time.Time
+	if asks != nil && musicAskWait < wait {
+		ask = time.After(musicAskWait)
+	}
+	for {
+		select {
+		case <-l.done:
+			musicLooks.Lock()
+			if musicLooks.m[key] == l {
+				delete(musicLooks.m, key)
+			}
+			musicLooks.Unlock()
+			v, _ := l.v.(T)
+			return v, l.code
+		case <-ask:
+			if l.asks.Load() {
+				return zero, "permission-wait"
+			}
+			// Not known yet to be guarded (finding out where a link leads
+			// may itself be slow): looked at again shortly.
+			ask = time.After(musicAskWait / 6)
+		case <-clock.C:
+			return zero, "timeout"
+		}
 	}
 }
 
 func musicBrowseWithin(p string, wait time.Duration) (musicBrowseBody, string) {
-	return musicWithin(wait, func() (musicBrowseBody, string) { return musicBrowse(p) })
+	return musicWithin(wait, "browse\n"+p, func() bool { return musicGuardedLinks(p) }, func() (musicBrowseBody, string) { return musicBrowse(p) })
 }
 
 func musicBrowse(raw string) (musicBrowseBody, string) {
@@ -126,10 +203,15 @@ func musicBrowse(raw string) (musicBrowseBody, string) {
 				continue
 			}
 			dir := e.IsDir()
-			if !dir && e.Type()&fs.ModeSymlink != 0 && links < musicBrowseLinks {
-				links++
-				if fi, err := os.Stat(filepath.Join(p, name)); err == nil && fi.IsDir() {
+			if !dir && e.Type()&fs.ModeSymlink != 0 {
+				if !musicLookAhead {
+					// Where it leads is looked at when it is opened.
 					dir = true
+				} else if links < musicBrowseLinks {
+					links++
+					if fi, err := os.Stat(filepath.Join(p, name)); err == nil && fi.IsDir() {
+						dir = true
+					}
 				}
 			}
 			if dir {
@@ -170,7 +252,7 @@ func musicBrowse(raw string) (musicBrowseBody, string) {
 	// shared by it; a shared folder that is itself a link is walked where
 	// it leads.
 	real := musicReal(p)
-	for _, r := range musicRoots(loadMusicConf()) {
+	for _, r := range loadMusicConf().Roots {
 		if r.Kind == "dir" && musicPathWithin(real, musicReal(r.Path)) {
 			b.Shared = r.ID
 			break
@@ -186,6 +268,57 @@ func musicReal(p string) string {
 		return r
 	}
 	return p
+}
+
+// musicLinksInto says whether p is, or leads through links into, a folder
+// named says yes to. Each folder on the way is looked at from the top, a link
+// followed by what it says, and nothing inside such a folder is looked at: on
+// macOS that look would be what the system asks about. Links lead on eight
+// deep at most.
+func musicLinksInto(p string, named func(string) bool) bool {
+	return musicLinksDepth(p, named, 0)
+}
+
+func musicLinksDepth(p string, named func(string) bool, depth int) bool {
+	if p == "" || !filepath.IsAbs(p) {
+		return false
+	}
+	p = filepath.Clean(p)
+	if named(p) {
+		return true
+	}
+	if depth >= 8 {
+		return false
+	}
+	sep := string(filepath.Separator)
+	vol := filepath.VolumeName(p)
+	parts := strings.Split(strings.TrimPrefix(p[len(vol):], sep), sep)
+	cur := vol + sep
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		if named(cur) {
+			return true
+		}
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return false
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		to, err := os.Readlink(cur)
+		if err != nil {
+			return false
+		}
+		if !filepath.IsAbs(to) {
+			to = filepath.Join(filepath.Dir(cur), to)
+		}
+		return musicLinksDepth(filepath.Join(append([]string{to}, parts[i+1:]...)...), named, depth+1)
+	}
+	return false
 }
 
 // musicPathArg is a folder named by a page: absolute, clean, valid text.
@@ -267,8 +400,9 @@ func musicFolderErr(p string, err error) string {
 	return "unavailable"
 }
 
-// musicPlaces: the Music folder, home and Downloads, then the disks, each
-// only if it is a folder here now.
+// musicPlaces: the Music folder, home and Downloads, then the disks — each
+// only if it is a folder here now, except on macOS, where they are named
+// without being looked at (musicLookAhead).
 func musicPlaces() []musicPlace {
 	var out []musicPlace
 	seen := map[string]bool{}
@@ -276,14 +410,16 @@ func musicPlaces() []musicPlace {
 		if pl.P == "" || seen[pl.P] {
 			return
 		}
-		if fi, err := os.Stat(pl.P); err != nil || !fi.IsDir() {
-			return
+		if musicLookAhead {
+			if fi, err := os.Stat(pl.P); err != nil || !fi.IsDir() {
+				return
+			}
 		}
 		seen[pl.P] = true
 		out = append(out, pl)
 	}
-	add(musicPlace{K: "music", P: musicDefaultCached()})
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		add(musicPlace{K: "music", P: musicHomeMusic(home)})
 		add(musicPlace{K: "home", P: home})
 		add(musicPlace{K: "downloads", P: filepath.Join(home, "Downloads")})
 	}

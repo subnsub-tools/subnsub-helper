@@ -74,12 +74,13 @@
 # runs it first is the machine that page will show.
 #
 # MUSIC — add --music to a --direct line and the browsers on this machine's
-# direct allowlist can play the music in its Music folder (or the folders
-# named with --music-dir PATH, which may be given more than once). Played over
-# the tailnet or the tailcat tunnel only, never through the relay; the files
-# stay here and are read only when a browser asks. Run the line again on a
-# machine that already has the helper to switch it on there; --music=off
-# stops sharing and keeps the list. 'subnsub-monitor music' shows what is
+# direct allowlist can play the music in the folders named with
+# --music-dir PATH (which may be given more than once), or chosen later on
+# the Monitor page where the console is on. No folder is shared, or read,
+# until one is named: there is no default. Played over the tailnet or the
+# tailcat tunnel only, never through the relay; the files stay here. Run the
+# line again on a machine that already has the helper to switch it on there;
+# --music=off stops sharing and keeps the list. 'subnsub-monitor music' shows what is
 # shared and changes it, and WebDAV folders the helper fetches are added from
 # the Monitor page by a pinned dashboard key, or here with 'music add-webdav'.
 #
@@ -133,14 +134,14 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=a2dd3eef58292fef2201bd944f2ff4d0919e85b3863ea6238197970a01274d83
-SUM_linux_arm64=097a3122f695b356be6740d7b510fb53bbe1cb4f0e466193b231315ca5e29a7b
-SUM_linux_arm=1fc0308fca7453d2eb91861ee07084a21ebea692ad24fc9b2075afa85c42efa3
-SUM_darwin_amd64=2d7a69a2ce2b589d69d48efeee714c569b888e6e5da4935144b3d717f4792d2f
-SUM_darwin_arm64=b4a5ac26b1a5d21f55a524bcfd5c31d82a5cbee848297ff585acb639b001efb6
-SUM_freebsd_amd64=03ef3e0b23fc5e06ea6c784710b11d69c640a5ee227919b76b09e3d9cd6f0905
-SUM_freebsd_arm64=619d29ca75484335a1278966b1d713e2e7271bb41db0d0cfcbdf52c52b47d338
-SUM_android_arm64=3d3b04a527c9d0dd4394a74168bafb050492a0361a1f886c2234559f1d6a84a3
+SUM_linux_amd64=91f09dd558145a7af2d20039fda8610f442d234af68059d271fda1b233f65047
+SUM_linux_arm64=92c11367db65f138ccaa6893f41fa05b34e57e2edd01336e162ead76dd5ab310
+SUM_linux_arm=570de70d5a56b16e560dc19444a0da729596638aa2768a91e2cd8962466c42aa
+SUM_darwin_amd64=34d0b93b313548ac31510c0e1e9824f636130e9d4e6baa00944ffa3d2b66c3c9
+SUM_darwin_arm64=798ab8868bcc2fbeec65fef62dcd644f1cca7ed3db3429124031e388c5315543
+SUM_freebsd_amd64=436618d2cd81c6decd586ccb4788ea4e38167de6f3a91f7e2540c4006e0a503e
+SUM_freebsd_arm64=757696e341b9a1e5a03315fe252063717799e49f47eca3b216a325fe31c9aa89
+SUM_android_arm64=626c8f66164d005de847ab00be41f8e3da0a7580a5cc7a2a439caed0d62f555a
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -1679,7 +1680,13 @@ case "$mus" in
   on*)
     say "music:          ON — the browsers on the direct allowlist can play what is shared,"
     say "                over the tailnet or the tailcat tunnel only:"
-    printf '%s\n' "$mus" | sed -n 's/^  /                  /p'
+    if printf '%s\n' "$mus" | grep -q '^  '; then
+        printf '%s\n' "$mus" | sed -n 's/^  /                  /p'
+    else
+        say "                  nothing yet, and nothing is read until a folder is chosen:"
+        say "                  $BINDIR/$NAME music add <folder>, or on the Monitor page"
+        say "                  where this machine's console is on"
+    fi
     say "                off with:  $BINDIR/$NAME music off" ;;
 esac
 say "uninstall:      sh install.sh --uninstall"

@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -56,7 +58,6 @@ func musicReset(t *testing.T) {
 	// turns it on, whatever the developer's own environment says.
 	t.Setenv(consoleEnvVar, "")
 	os.Unsetenv(consoleEnvVar)
-	musicDefaultForget()
 	musicIndexBudget = 0
 	t.Cleanup(func() { musicIndexBudget = 0 })
 }
@@ -166,7 +167,7 @@ func errCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return e.Code
 }
 
-func TestMusicOnSharesTheMusicFolderAndWalksIt(t *testing.T) {
+func TestMusicOnSharesWhatIsNamedAndWalksIt(t *testing.T) {
 	f := newMusicFixture(t)
 	if musicOn() {
 		t.Fatal("music is off until somebody at the machine turns it on")
@@ -179,8 +180,20 @@ func TestMusicOnSharesTheMusicFolderAndWalksIt(t *testing.T) {
 		t.Fatalf("the settings file is the owner's alone: %v %v", fi.Mode(), err)
 	}
 	musicSettle(t)
-
 	var st musicStatusBody
+	musicBody(t, f.get(t, "/v1/music", &f.peer), &st)
+	if !st.On || len(st.Roots) != 0 || len(musicLib.roots) != 0 {
+		t.Fatalf("on, with nothing named, shares and reads nothing (not even ~/Music): %+v", st)
+	}
+	if _, err := os.Stat(musicIndexPath()); err == nil {
+		t.Fatal("an index of folders nobody named")
+	}
+	if rc := runMusicCLI([]string{"add", f.music}); rc != 0 {
+		t.Fatalf("music add: %d", rc)
+	}
+	musicSettle(t)
+
+	st = musicStatusBody{}
 	musicBody(t, f.get(t, "/v1/music", &f.peer), &st)
 	if !st.On || len(st.Roots) != 1 || st.Roots[0].Kind != "dir" || st.Roots[0].Where != "~/Music" || st.Roots[0].Tracks != 3 {
 		t.Fatalf("status: %+v", st)
@@ -214,7 +227,7 @@ func TestMusicOnSharesTheMusicFolderAndWalksIt(t *testing.T) {
 
 func TestMusicIndexPages(t *testing.T) {
 	f := newMusicFixture(t)
-	runMusicCLI([]string{"on"})
+	runMusicCLI([]string{"on", f.music})
 	musicSettle(t)
 	musicIndexBudget = 200 // about one track a page
 	id := musicLib.order[0]
@@ -238,7 +251,7 @@ func TestMusicIndexPages(t *testing.T) {
 
 func TestMusicFileReadsOnlyIndexedTracks(t *testing.T) {
 	f := newMusicFixture(t)
-	runMusicCLI([]string{"on"})
+	runMusicCLI([]string{"on", f.music})
 	musicSettle(t)
 	id := musicLib.order[0]
 	disk, _ := os.ReadFile(filepath.Join(f.music, "Band", "Album", "01 First.mp3"))
@@ -270,7 +283,7 @@ func TestMusicFileReadsOnlyIndexedTracks(t *testing.T) {
 
 func TestMusicGate(t *testing.T) {
 	f := newMusicFixture(t)
-	runMusicCLI([]string{"on"})
+	runMusicCLI([]string{"on", f.music})
 	musicSettle(t)
 	// No peer, a stranger: refused.
 	if rec := f.get(t, "/v1/music", nil); rec.Code != http.StatusForbidden {
@@ -328,7 +341,7 @@ func containsStr(xs []string, s string) bool {
 
 func TestMusicArt(t *testing.T) {
 	f := newMusicFixture(t)
-	runMusicCLI([]string{"on"})
+	runMusicCLI([]string{"on", f.music})
 	musicSettle(t)
 	id := musicLib.order[0]
 	rec := f.get(t, "/v1/music/art?r="+id+"&p="+url.QueryEscape("Band/Album/01 First.mp3")+"&w=256", &f.peer)
@@ -347,7 +360,7 @@ func TestMusicArt(t *testing.T) {
 
 func TestMusicIndexSurvivesARestartWithoutReadingAgain(t *testing.T) {
 	f := newMusicFixture(t)
-	runMusicCLI([]string{"on"})
+	runMusicCLI([]string{"on", f.music})
 	musicSettle(t)
 	id := musicLib.order[0]
 	rev := musicLib.roots[id].rev
@@ -540,7 +553,7 @@ func TestMusicWebDAVWalkAndRead(t *testing.T) {
 
 func TestMusicWebDAVCommandAndPin(t *testing.T) {
 	f := newMusicFixture(t)
-	runMusicCLI([]string{"on"})
+	runMusicCLI([]string{"on", f.music})
 	pub, _, _ := ed25519.GenerateKey(nil)
 	cmd := func(op string, arg any) consoleResult {
 		b, _ := json.Marshal(arg)
@@ -634,8 +647,9 @@ func TestMusicDavURLs(t *testing.T) {
 	}
 }
 
-// The console's grant: a machine that runs a pinned dashboard's lines shares
-// its Music folder without `music on`, and `music off` still wins.
+// The console and a pinned key switch music on, and nothing more: no folder
+// is shared, and none is read, until one is chosen (user 2026-11-04: only a path
+// the person chose is ever scanned).
 func TestMusicOnByTheConsole(t *testing.T) {
 	f := newMusicFixture(t)
 	pub, _, _ := ed25519.GenerateKey(nil)
@@ -662,14 +676,22 @@ func TestMusicOnByTheConsole(t *testing.T) {
 	}
 	musicSettle(t)
 	st, rec := status()
-	if rec.Code != 200 || len(st.Roots) != 1 || st.Roots[0].Where != "~/Music" || st.Roots[0].ID != musicAutoID(f.music) || st.Roots[0].Tracks != 3 {
-		t.Fatalf("the Music folder, shared by itself: %d %+v", rec.Code, st)
+	if rec.Code != 200 || len(st.Roots) != 0 {
+		t.Fatalf("on, with nothing shared: %d %+v", rec.Code, st)
 	}
 	if !containsStr(st.CanAdd, "dir") || !containsStr(st.CanAdd, "webdav") {
-		t.Fatalf("this machine's folders may be added from the page: %v", st.CanAdd)
+		t.Fatalf("this machine's folders may be chosen from the page: %v", st.CanAdd)
 	}
-	if _, err := os.Stat(musicConfPath()); err == nil {
-		t.Fatal("nothing is written down until something is chosen")
+	musicLib.Lock()
+	walked := len(musicLib.roots)
+	musicLib.Unlock()
+	if walked != 0 || musicNextDue(time.Now()) != nil {
+		t.Fatal("the Music folder full of tracks is not read")
+	}
+	for _, p := range []string{musicConfPath(), musicIndexPath()} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("nothing is written down until something is chosen: %s", p)
+		}
 	}
 	var hello transport.Hello
 	fr, _ := transport.Decode(f.get(t, "/v1/hello", &f.peer).Body.Bytes())
@@ -677,15 +699,15 @@ func TestMusicOnByTheConsole(t *testing.T) {
 	if !containsStr(hello.Caps, transport.CapMusic) {
 		t.Fatalf("the hello names music: %v", hello.Caps)
 	}
-	// Off at the keyboard wins; on again brings the same folder back.
+	// Off at the keyboard wins; on again shares no folder by itself either.
 	runMusicCLI([]string{"off"})
 	if _, rec := status(); rec.Code != http.StatusNotFound || errCode(t, rec) != "music-off" {
 		t.Fatalf("music off beats the console: %d", rec.Code)
 	}
 	runMusicCLI([]string{"on"})
 	musicSettle(t)
-	if st, _ := status(); len(st.Roots) != 1 || st.Roots[0].ID != musicAutoID(f.music) {
-		t.Fatalf("on again: %+v", st.Roots)
+	if st, _ := status(); len(st.Roots) != 0 {
+		t.Fatalf("on again, nothing named: %+v", st.Roots)
 	}
 	// The console off again: music stays on, since it was switched on here.
 	t.Setenv(consoleEnvVar, "0")
@@ -715,7 +737,7 @@ func TestMusicOffFromBeforeTheGrantStaysOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(consoleEnvVar, "1")
-	id := musicAutoID("before")
+	id := "aa11bb22cc33"
 	write := func(on bool) {
 		t.Helper()
 		b, _ := json.Marshal(map[string]any{"v": 1, "on": on, "roots": []map[string]string{{"id": id, "kind": "dir", "path": f.music}}})
@@ -730,11 +752,11 @@ func TestMusicOffFromBeforeTheGrantStaysOff(t *testing.T) {
 		musicConfCache.Unlock()
 	}
 	write(false)
-	if c := loadMusicConf(); musicOn() || !c.Off || !c.Set {
+	if c := loadMusicConf(); musicOn() || !c.Off {
 		t.Fatalf("off before the grant, off now: %+v", c)
 	}
 	write(true)
-	if c := loadMusicConf(); !musicOn() || c.Off || len(musicRoots(c)) != 1 || musicRoots(c)[0].ID != id {
+	if c := loadMusicConf(); !musicOn() || c.Off || len(c.Roots) != 1 || c.Roots[0].ID != id {
 		t.Fatalf("on before the grant, its folders as they were: %+v", c)
 	}
 }
@@ -763,7 +785,12 @@ func TestMusicAddDirThroughLinks(t *testing.T) {
 	if err := os.Symlink(outside, shelf); err != nil {
 		t.Fatal(err)
 	}
-	r := cmd("browse", map[string]string{"path": shelf})
+	r := cmd("add-dir", map[string]string{"path": f.music})
+	if r.Code != 0 {
+		t.Fatalf("the Music folder, chosen: %+v", r)
+	}
+	musicID := r.Out
+	r = cmd("browse", map[string]string{"path": shelf})
 	var b musicBrowseBody
 	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &b) != nil || b.Shared != "" || strings.Join(b.Dirs, ",") != "Disk" {
 		t.Fatalf("through a link inside the Music folder, not shared by it: %+v %+v", r, b)
@@ -772,7 +799,7 @@ func TestMusicAddDirThroughLinks(t *testing.T) {
 		t.Fatalf("shared where it leads: %+v", r)
 	}
 	c := loadMusicConf()
-	if len(c.Roots) != 2 || c.Roots[0].ID != musicAutoID(f.music) || c.Roots[1].Path != shelf {
+	if len(c.Roots) != 2 || c.Roots[0].ID != musicID || c.Roots[1].Path != shelf {
 		t.Fatalf("beside the Music folder: %+v", c.Roots)
 	}
 	if r := cmd("add-dir", map[string]string{"path": filepath.Join(outside, "Disk")}); r.Error != "already-shared" || r.Out != c.Roots[1].ID {
@@ -792,6 +819,188 @@ func TestMusicAddDirThroughLinks(t *testing.T) {
 	}
 	if r := cmd("add-dir", map[string]string{"path": everything}); r.Error != "too-broad" {
 		t.Fatalf("a link to the whole system: %+v", r)
+	}
+}
+
+// A look the system holds up while it asks the person at the machine is
+// answered as waiting, not timed out, and asked again it waits on the same
+// look instead of starting another; once answered, the next question gets an
+// answer (musicWithin). Elsewhere a look holds the whole clock.
+// musicLookDone waits for the look under key to have finished.
+func musicLookDone(t *testing.T, key string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		musicLooks.Lock()
+		l := musicLooks.m[key]
+		fin := l != nil && !l.doneAt.IsZero()
+		musicLooks.Unlock()
+		if fin {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the look never finished")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestMusicLookWaitsOnPermission(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	calls := 0
+	look := func() (string, string) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		<-release
+		return "listed", ""
+	}
+	guarded := func() bool { return true }
+	key := "test\n" + t.Name()
+	for i := 0; i < 2; i++ {
+		start := time.Now()
+		if _, code := musicWithin(time.Minute, key, guarded, look); code != "permission-wait" || time.Since(start) > 10*time.Second {
+			t.Fatalf("held up on a guarded folder: %q after %v", code, time.Since(start))
+		}
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("asked again, the same look: %d", n)
+	}
+	// Allowed at the machine: the question asked again has what the look
+	// found, once, and the one after that is a new look.
+	close(release)
+	musicLookDone(t, key)
+	again := func() (string, string) { return "again", "" }
+	if v, code := musicWithin(time.Minute, key, guarded, again); code != "" || v != "listed" {
+		t.Fatalf("the allowed look's answer: %q %q", v, code)
+	}
+	if v, code := musicWithin(time.Minute, key, guarded, again); code != "" || v != "again" {
+		t.Fatalf("answered twice by one look: %q %q", v, code)
+	}
+
+	// Guarded by where a link leads, found out in the look and late: still
+	// a wait on the system's question, not a timeout.
+	late, hold := make(chan struct{}), make(chan struct{})
+	defer close(hold)
+	go func() { time.Sleep(musicAskWait + 300*time.Millisecond); close(late) }()
+	start := time.Now()
+	if _, code := musicWithin(time.Minute, key+"-link", func() bool { <-late; return true }, func() (string, string) { <-hold; return "", "" }); code != "permission-wait" || time.Since(start) > 10*time.Second {
+		t.Fatalf("a link into a guarded folder: %q after %v", code, time.Since(start))
+	}
+
+	// A folder nobody is asked about: held up for the whole clock, and the
+	// answer that comes after is the next one given — for a while.
+	stuck := make(chan struct{})
+	plain := key + "-plain"
+	if _, code := musicWithin(300*time.Millisecond, plain, func() bool { return false }, func() (string, string) { <-stuck; return "late", "" }); code != "timeout" {
+		t.Fatalf("a folder nobody is asked about, held up: %q", code)
+	}
+	close(stuck)
+	musicLookDone(t, plain)
+	if v, _ := musicWithin(time.Minute, plain, nil, func() (string, string) { return "fresh", "" }); v != "late" {
+		t.Fatalf("the slow look's answer, asked again: %q", v)
+	}
+	stale := make(chan struct{})
+	if _, code := musicWithin(100*time.Millisecond, plain, nil, func() (string, string) { <-stale; return "old", "" }); code != "timeout" {
+		t.Fatalf("held up: %q", code)
+	}
+	close(stale)
+	musicLookDone(t, plain)
+	musicLooks.Lock()
+	musicLooks.m[plain].doneAt = time.Now().Add(-musicLookKeep - time.Second)
+	musicLooks.Unlock()
+	if v, _ := musicWithin(time.Minute, plain, nil, func() (string, string) { return "fresh", "" }); v != "fresh" {
+		t.Fatalf("an answer kept past musicLookKeep: %q", v)
+	}
+}
+
+// Where a link leads, by what it says: nothing inside a guarded folder is
+// looked at (so a path there need not even be there), links lead on, and a
+// loop of them ends.
+func TestMusicLinksInto(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("links need a privilege on Windows")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := filepath.Join(dir, "Guarded")
+	for _, d := range []string{filepath.Join(g, "in"), filepath.Join(dir, "Plain", "in")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	named := func(p string) bool { return p == g || strings.HasPrefix(p, g+string(filepath.Separator)) }
+	for at, to := range map[string]string{
+		"Abs": g, "Rel": "Guarded", "Chain": filepath.Join(dir, "Abs"), "ToPlain": "Plain",
+		"LoopA": filepath.Join(dir, "LoopB"), "LoopB": filepath.Join(dir, "LoopA"),
+	} {
+		if err := os.Symlink(to, filepath.Join(dir, at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for p, want := range map[string]bool{
+		filepath.Join(g, "in"):                           true,
+		filepath.Join(dir, "Abs", "in"):                  true,
+		filepath.Join(dir, "Rel", "in", "not", "there"):  true,
+		filepath.Join(dir, "Chain", "in"):                true,
+		filepath.Join(dir, "ToPlain", "in"):              false,
+		filepath.Join(dir, "Plain"):                      false,
+		filepath.Join(dir, "LoopA", "x"):                 false,
+		filepath.Join(dir, "missing", "x"):               false,
+		"relative" + string(filepath.Separator) + "path": false,
+		"": false,
+	} {
+		if got := musicLinksInto(p, named); got != want {
+			t.Errorf("%q: %v, want %v", p, got, want)
+		}
+	}
+}
+
+// The Music folder 2026.11.04.2 shared by itself, written down beside a
+// folder added from a page, is shared no longer, and its index is dropped;
+// a folder somebody chose stays.
+func TestMusicForgetsTheFolderNobodyChose(t *testing.T) {
+	f := newMusicFixture(t)
+	h := sha256.Sum256([]byte("music-folder\n" + f.music))
+	auto, mine := hex.EncodeToString(h[:6]), "aa11bb22cc33"
+	other := filepath.Join(f.home, "Private")
+	b, _ := json.Marshal(map[string]any{"v": 2, "on": true, "set": true, "roots": []map[string]string{
+		{"id": auto, "kind": "dir", "path": f.music}, {"id": mine, "kind": "dir", "path": other}}})
+	if err := os.MkdirAll(filepath.Dir(musicConfPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(musicConfPath(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ix, _ := json.Marshal(musicSaved{V: 1, Roots: map[string]*musicSavedRoot{
+		auto: {Rev: 1, At: 1, Sig: "dir:" + f.music, Tracks: []musicTrack{{P: "Band/Album/01 First.mp3"}}},
+		mine: {Rev: 2, At: 2, Sig: "dir:" + other, Tracks: []musicTrack{{P: "diary.mp3"}}},
+	}})
+	if err := os.WriteFile(musicIndexPath(), ix, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	musicConfCache.Lock()
+	musicConfCache.ok = false
+	musicConfCache.Unlock()
+	if c := loadMusicConf(); len(c.Roots) != 1 || c.Roots[0].ID != mine {
+		t.Fatalf("the folders shared: %+v", c.Roots)
+	}
+	musicReconcile()
+	musicLib.Lock()
+	_, kept := musicLib.roots[mine]
+	n := len(musicLib.roots)
+	musicLib.Unlock()
+	if !kept || n != 1 {
+		t.Fatalf("the library: %d roots, the chosen one %v", n, kept)
+	}
+	disk, err := os.ReadFile(musicIndexPath())
+	if err != nil || bytes.Contains(disk, []byte(auto)) || bytes.Contains(disk, []byte("First.mp3")) || !bytes.Contains(disk, []byte(mine)) {
+		t.Fatalf("the index on disk still holds the folder nobody chose: %v %s", err, disk)
 	}
 }
 
@@ -824,7 +1033,8 @@ func TestMusicBrowseAndAddDir(t *testing.T) {
 			t.Fatalf("%s without the console: %+v", op, r)
 		}
 	}
-	// A machine whose music nobody switched on, with the console on.
+	// A machine whose music nobody switched on, with the console on: on,
+	// sharing nothing, until a folder is chosen.
 	os.Remove(musicConfPath())
 	t.Setenv(consoleEnvVar, "1")
 	musicSettle(t)
@@ -840,7 +1050,7 @@ func TestMusicBrowseAndAddDir(t *testing.T) {
 	if runtime.GOOS != "windows" && kinds["root"] != "/" {
 		t.Fatalf("the whole tree is a place: %+v", places.Places)
 	}
-	if _, ok := kinds["downloads"]; ok {
+	if _, ok := kinds["downloads"]; ok && musicLookAhead {
 		t.Fatal("a Downloads folder that is not there is not a place")
 	}
 	home := browse(f.home)
@@ -848,11 +1058,11 @@ func TestMusicBrowseAndAddDir(t *testing.T) {
 		t.Fatalf("home: %+v", home)
 	}
 	music := browse(f.music)
-	if strings.Join(music.Dirs, ",") != "Band,Other" || music.Shared != musicAutoID(f.music) {
-		t.Fatalf("hidden and NAS folders are not listed, and the shared folder says so: %+v", music)
+	if strings.Join(music.Dirs, ",") != "Band,Other" || music.Shared != "" {
+		t.Fatalf("hidden and NAS folders are not listed, and nothing is shared yet: %+v", music)
 	}
 	album := browse(filepath.Join(f.music, "Band", "Album"))
-	if album.Audio != 2 || strings.Join(album.Names, ",") != "01 First.mp3,02 Second.mp3" || len(album.Dirs) != 0 || album.Shared != musicAutoID(f.music) {
+	if album.Audio != 2 || strings.Join(album.Names, ",") != "01 First.mp3,02 Second.mp3" || len(album.Dirs) != 0 || album.Shared != "" {
 		t.Fatalf("an album: %+v", album)
 	}
 	for p, want := range map[string]string{"relative/path": "bad-path", filepath.Join(f.home, "nope"): "missing", filepath.Join(f.music, "Other", "notes.txt"): "not-a-folder"} {
@@ -860,25 +1070,35 @@ func TestMusicBrowseAndAddDir(t *testing.T) {
 			t.Fatalf("browse %s: %+v, want %s", p, r, want)
 		}
 	}
+	if c := loadMusicConf(); len(c.Roots) != 0 {
+		t.Fatalf("looking shares nothing: %+v", c)
+	}
 
-	// Sharing another folder keeps the Music folder shared beside it, and
-	// writes both down as chosen.
+	// The folder chosen is shared, alone, and read.
 	private := filepath.Join(f.home, "Private")
 	r := cmd("add-dir", map[string]string{"path": private, "name": "Mine"})
 	if r.Code != 0 || r.Out == "" {
 		t.Fatalf("add-dir: %+v", r)
 	}
 	c := loadMusicConf()
-	if !c.Set || len(c.Roots) != 2 || c.Roots[0].ID != musicAutoID(f.music) || c.Roots[1].Path != private || c.Roots[1].Name != "Mine" {
-		t.Fatalf("written down: %+v", c)
+	if len(c.Roots) != 1 || c.Roots[0].Path != private || c.Roots[0].Name != "Mine" || c.On {
+		t.Fatalf("written down, music on by the console alone: %+v", c)
 	}
 	musicSettle(t)
 	var st musicStatusBody
 	musicBody(t, f.get(t, "/v1/music", &f.peer), &st)
-	if len(st.Roots) != 2 || st.Roots[1].Name != "Mine" || st.Roots[1].Tracks != 1 {
+	if len(st.Roots) != 1 || st.Roots[0].Name != "Mine" || st.Roots[0].Tracks != 1 {
 		t.Fatalf("status: %+v", st.Roots)
 	}
-	if r := cmd("add-dir", map[string]string{"path": filepath.Join(f.music, "Band")}); r.Error != "already-shared" || r.Out != musicAutoID(f.music) {
+	r = cmd("add-dir", map[string]string{"path": f.music})
+	if r.Code != 0 {
+		t.Fatalf("the Music folder, chosen: %+v", r)
+	}
+	musicID := r.Out
+	if b := browse(filepath.Join(f.music, "Band")); b.Shared != musicID {
+		t.Fatalf("a folder inside a shared one says so: %+v", b)
+	}
+	if r := cmd("add-dir", map[string]string{"path": filepath.Join(f.music, "Band")}); r.Error != "already-shared" || r.Out != musicID {
 		t.Fatalf("a folder inside a shared one: %+v", r)
 	}
 	for p, want := range map[string]string{"relative": "bad-path", filepath.Join(f.home, "nope"): "missing", filepath.Join(f.music, "Other", "notes.txt"): "not-a-folder"} {
@@ -902,8 +1122,8 @@ func TestMusicBrowseAndAddDir(t *testing.T) {
 	if len(c.Roots) != 1 || c.Roots[0].Path != f.home {
 		t.Fatalf("home in place of the two inside it: %+v", c.Roots)
 	}
-	// Taking the last one away leaves nothing shared: the Music folder does
-	// not come back by itself once something was chosen.
+	// Taking the last one away leaves nothing shared, and nothing comes back
+	// by itself.
 	if r := cmd("remove", map[string]string{"id": c.Roots[0].ID}); r.Code != 0 {
 		t.Fatalf("remove: %+v", r)
 	}
@@ -911,15 +1131,6 @@ func TestMusicBrowseAndAddDir(t *testing.T) {
 	musicBody(t, f.get(t, "/v1/music", &f.peer), &st)
 	if len(st.Roots) != 0 {
 		t.Fatalf("nothing shared: %+v", st.Roots)
-	}
-	// The Music folder shared by itself can be taken away too, and stays away.
-	os.Remove(musicConfPath())
-	musicSettle(t)
-	if r := cmd("remove", map[string]string{"id": musicAutoID(f.music)}); r.Code != 0 {
-		t.Fatalf("remove the Music folder: %+v", r)
-	}
-	if c := loadMusicConf(); !c.Set || len(c.Roots) != 0 || len(musicRoots(c)) != 0 {
-		t.Fatalf("chosen, empty: %+v", c)
 	}
 }
 

@@ -18,4 +18,4 @@ package main
 // that matters. N counts releases within a day and starts at 1, because two
 // releases on one date is an ordinary Tuesday and a version that cannot
 // express it silently reports the earlier build as current.
-const helperVersion = "2026.11.04.2"
+const helperVersion = "2026.11.04.3"
