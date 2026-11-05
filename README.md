@@ -20,6 +20,9 @@ This repository contains the Go helper (`go/`), the installation scripts (`insta
 - [Installation](#installation)
   - [Android over USB](#android-over-usb)
 - [Direct mode](#direct-mode)
+  - [Tailnet road](#tailnet-road)
+  - [Music](#music)
+  - [Files](#files)
   - [Pairing](#pairing)
 - [Supported providers](#supported-providers)
   - [Subprocess execution rules](#subprocess-execution-rules)
@@ -121,7 +124,7 @@ The Direct card on the Monitor page generates a browser node key and prints this
 - **Relay features not present in standalone direct mode:** Cloud presence history, relay-stored trends while the machine is unreachable, cloud session archiving, web push notifications, and cross-machine account folding require an account and relay connection.
 - **Read-only by default:** The tunnel only starts when at least one browser key is listed in `~/.config/subnsub-monitor/allowed-clients` (`subnsub-monitor allow <key>` / `disallow <key>`). Allowing a browser node key grants **read-only** observation (`hello`, snapshots, 1 Hz health stream, and local history). Commands and interactive terminals require the browser's Ed25519 signing key to be pinned in `trusted-keys` (`MON_PUBKEY` or `subnsub-monitor trust <key>`).
 - **Hybrid mode (Relay + Direct):** When configured with both a relay token and `--direct`, both transports run side by side. Interactive terminals and plaintext shell commands always travel exclusively over the direct tunnel, never through the relay. Set `MON_TRANSPORT=relay` or `MON_TRANSPORT=tailcat` to force a single transport.
-- **CLI controls:** `subnsub-monitor direct on|off`, `allow`, `disallow`, `address` (prints the direct address and node key, and a pairing still waiting), and `transfer on|off` (allows an authorized browser to relay an end-to-end encrypted peer-to-peer file transfer stream through the tunnel when direct WebRTC fails; enabled by default when direct mode is on).
+- **CLI controls:** `subnsub-monitor direct on|off`, `allow`, `disallow`, and `address` (prints the direct address and node key, and a pairing still waiting). From helper 2026.11.05.1 there is no transfer pipe: browsers send files to each other over tailcat with no machine in the middle, so `transfer` only says so, and `MON_TRANSFER` and the `no-transfer` file are no longer read.
 
 ### Tailnet road
 
@@ -129,7 +132,7 @@ From helper 2026.11.03.1, a machine in direct mode that is on a Tailscale networ
 
 - **Found without the CLI:** the address comes from the machine's interfaces and the name from Tailscale's resolver at `100.100.100.100` (`tailnet.go`). Nothing listens while Tailscale is down or no browser key is allowed. `MON_TAILNET=off` keeps the port closed.
 - **The network is not trusted:** anything on the tailnet can reach the port. A browser takes the machine's X25519 key from a hello that came through the tunnel, its own key must be on `allowed-clients`, and a session is derived from both plus a fresh key on each side (HKDF-SHA256). Every request and answer is AES-256-GCM to that session, numbered so none can be replayed, cut short or moved. A struck key is refused on its next request.
-- **What it carries:** the same read-only view, commands, terminals and music as the tunnel. Transfers stay on the tunnel.
+- **What it carries:** the same read-only view, commands, terminals, music and files as the tunnel.
 - **Browsers:** Chrome, which can reach a local network address from an https page once the user allows local network access. Other browsers stay on the tunnel. See [the Monitor docs](https://tools.subnsub.com/monitor-docs) for the API.
 
 ### Music
@@ -141,6 +144,14 @@ From helper 2026.11.04.1, a machine in direct mode can share the music on it wit
 - **Only what the walk indexed:** a folder is walked for audio files (MP3, AAC/M4A, FLAC, Ogg/Opus, WAV, AIFF, WebM, CAF), at most 16 folders per machine, 100,000 tracks per folder and 24 levels deep. A request names a track by its path in that folder's index and is answered only if the index holds it; local reads go through `os.Root`, which refuses any path that leaves the folder. Tags, durations and covers are read on the machine (`musictags.go`); covers are scaled there (128, 256, 512 or 1024 px).
 - **What travels:** `GET /v1/music` (the folders, their track counts and revisions), `/v1/music/index` (one page of a folder's tracks), `/v1/music/file` (a range of a track's bytes, at most 4 MiB per request) and `/v1/music/art` (a scaled cover), all over the tunnel or the tailnet road, sealed as everything else there is.
 - **WebDAV:** a WebDAV folder (a NAS, Nextcloud) is listed with `PROPFIND` and read by range by the helper itself (`musicdav.go`). A browser whose signing key the machine has pinned may add one, look through any folder again, or stop sharing one, by a signed `music` command over the tunnel; unless the console is on, it cannot look through or name a local folder, which is then added only at the machine. The account and password are kept in `music.json` (mode `0600`) on the machine and nowhere else. A server whose certificate the system does not trust is refused until its SHA-256 fingerprint is pinned (`cert-untrusted` carries the fingerprint for the page to show); a changed certificate is refused as `cert-changed`.
+
+### Files
+
+From helper 2026.11.05.1, the Monitor page's Files tab can look through, search, read and change the files on a machine whose console is on and which has pinned the dashboard's signing key. That key may already run a shell there as this account, so there is no second switch. It travels only over the tunnel or the tailnet road: the relay's mailbox refuses the `files` command kind (`tunnel-only`), and portable copies (`clone`) are refused. The hello reports `files`, and `files-write` for the commands that change the disk (`files.go`, `fileswrite.go`).
+
+- **Reading:** signed `files` commands `list` (one folder's own entries), `search`, `walk`, `stop` and `open`. A search walks the disks while it runs and keeps nothing: no index is built and nothing is written. It goes home first, then each mounted disk, breadth first, each root on its own disk, never following a link and never entering hidden folders or package internals such as `node_modules`. A name matches when it holds every word of the question (case-insensitive; `*` and `?` as wildcards). A search stops at 1,000 matches, 200,000 folders or 90 seconds, or once the browser has not collected results for 30 seconds; a machine runs at most four at once, one per browser. `walk` lists every entry under one folder for copying it (hidden ones and package internals included, a link reported as a link, at most 100,000 entries). `search`, `walk` and `open` answer a 128-bit token for `/v1/files/search` (results, long-polled) and `/v1/files/file` (a file's bytes, at most 4 MiB a request, refused as `changed` once the file's size or time moved). A token works only on the tunnel of the peer that asked for it, and only while the console is on, that peer is on `allowed-clients` and the key that signed the command is still pinned; a file token lapses ten minutes after its last read.
+- **Writing:** `put` opens an upload into a hidden part file beside its destination (`.subnsub-<k>.part`, created `0600` whatever the umask, never through a link), `POST /v1/files/put` carries its bytes in order (at most 4 MiB a piece), and `done` syncs it to the disk and gives it its name: by a hard link where the disk has them, so a name that is taken is never overwritten unless `replace` was asked for (`keep` takes "name (2)" instead, `fail` lets the page ask). An upload the page gave a key resumes from its part file's length after a dropped tunnel or a restart. A save that names what the page saw (`was`: the size and time from the listing) is refused as `changed-since` when the file changed on the disk meanwhile. `mkdir`, `rename`, `move` (within one disk; `cross-device` otherwise) and `trash` complete the set. Nothing is deleted: `trash` moves into this user's own trash (`~/.Trash` on macOS, the freedesktop trash elsewhere, from which the desktop can restore it), and where there is none to move into (Windows, Android, another disk) it answers `trash-unavailable`. The root, the system's top-level folders, the home folder and a mounted disk itself are refused as `too-broad`.
+- **Bounded:** the disk work runs on a 15-second clock outside the command lock, so a network disk that went away holds up nothing else on the machine; a machine keeps at most 32 uploads open, 16 per browser, and closes one that has had no piece for 15 minutes.
 
 ### Pairing
 
@@ -520,7 +531,6 @@ subnsub-monitor direct [on|off]        Show or set direct browser tunnel mode
 subnsub-monitor allow [KEY]            List or add a browser tailcat node key for direct mode
 subnsub-monitor disallow KEY           Revoke a browser tailcat node key
 subnsub-monitor address                Print this machine's direct tunnel address and node key
-subnsub-monitor transfer [on|off]      Show or set encrypted peer-to-peer transfer relay on tunnel
 subnsub-monitor music [on|off]         List what is shared with direct-mode browsers, or switch it on or off
 subnsub-monitor music add FOLDER       Share a local folder (at the machine, or from a page when the console is on)
 subnsub-monitor music add-webdav URL   Share a WebDAV folder (--user NAME; password from MON_WEBDAV_PASSWORD)
@@ -552,7 +562,6 @@ Every persistent toggle is stored as a file in `~/.config/subnsub-monitor/`; env
 | `MON_DIRECT` | `1` or `0`: override the `direct` tunnel switch |
 | `MON_DERPMAP` | Custom HTTPS URL for the tailcat DERP map |
 | `MON_TRANSPORT` | `relay` or `tailcat`: force a single transport mode |
-| `MON_TRANSFER` | `1` or `0`: allow/disallow encrypted file transfer piping over the direct tunnel |
 | `MON_MUSIC` | Set `off` to share no music for this run, whatever `music.json` says |
 | `MON_WEBDAV_PASSWORD` | The password `music add-webdav` stores for the folder (asked for when unset) |
 | `MON_BEACON` | Set `off` to keep sending full snapshots to the relay while a direct tunnel is active |

@@ -251,7 +251,7 @@ func TestCloneCommandsOverTheTunnel(t *testing.T) {
 			t.Errorf("copy's %s: %+v", kind, res)
 		}
 	}
-	// The copy is no transfer guest: it may read the hello.
+	// The copy may read the hello.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/hello", nil)
 	h.ServeHTTP(rec, req.WithContext(transport.WithPeer(req.Context(), copyNode)))

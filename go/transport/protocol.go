@@ -70,13 +70,6 @@ const (
 	// TypeHistory is the machine's own trend archive (history.go),
 	// in the dashboard's bucket-row shape; served on request, never streamed.
 	TypeHistory = "history"
-	// TypePipe is the Transfer tool asking this machine to couple two browsers
-	// for one file transfer (pipe.go): an allowed browser POSTs an
-	// invite naming a session id and the OTHER browser's node key, and the
-	// machine answers with the same type. Its body is Pipe. The bytes that
-	// then flow are NOT frames — they are the Transfer tool's own encrypted
-	// pipe frames, opaque to the machine, on /v1/pipe/send and /v1/pipe/recv.
-	TypePipe = "pipe"
 	// TypePair is the one frame a pairing node serves (pair.go): the
 	// machine's own tunnel address, handed to the browser whose key the
 	// install line named, over the pairing node's tunnel — the road by which
@@ -103,7 +96,6 @@ var Limits = map[string]int{
 	TypeCommand:  16 << 10,
 	TypeResult:   256 << 10,
 	TypeHistory:  1 << 20,
-	TypePipe:     4 << 10,
 	TypePair:     4 << 10,
 	// Under the browser module's 1 MiB answer ceiling (tailcat-web
 	// maxGetBody), envelope included.
@@ -125,13 +117,6 @@ const (
 	// CapInspect: the read-only process list (`inspect` commands). Its own
 	// switch at the machine, so its own capability here.
 	CapInspect = "inspect"
-	// CapTransfer: the machine will couple this browser with one other
-	// browser for a file transfer (the Transfer tool's fourth leg). Named to
-	// an allowed browser while the transfer switch is on, and to an invited
-	// guest as the ONLY thing it may do. The machine moves ciphertext it
-	// cannot read between exactly the two parties of one invite — never to
-	// an address of anyone's choosing.
-	CapTransfer = "transfer"
 	// CapTerminal: a shell on a pseudo-terminal, streamed through this
 	// tunnel (helper pty.go). The console's switch and a pinned key, on a
 	// platform that has pseudo-terminals.
@@ -154,6 +139,15 @@ const (
 	// named on the machine, and WebDAV folders a pinned dashboard added —
 	// with the browsers on its allowlist, over the direct roads alone.
 	CapMusic = "music"
+	// CapFiles: the Files tab may look through this machine's disks and read
+	// its files (files.go) — named to an allowlisted browser where the
+	// console is on, since a console already grants as much.
+	CapFiles = "files"
+	// CapFilesWrite: the Files tab may also put things on this machine's
+	// disks — a file a piece at a time, a folder, a new name, a move, the
+	// system's trash (fileswrite.go) — under the same grant as CapFiles. A
+	// helper that names files without it only reads.
+	CapFilesWrite = "files-write"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on
@@ -184,7 +178,7 @@ type Hello struct {
 	Path string `json:"path,omitempty"`
 	// Tailnet is where this machine also answers on its Tailscale network,
 	// for a reader to reach it without the tunnel (main package, tailnet.go).
-	// Absent when Tailscale is not up here, and never told to a transfer guest.
+	// Absent when Tailscale is not up here.
 	Tailnet *TailnetRoad `json:"tailnet,omitempty"`
 }
 
@@ -220,24 +214,6 @@ type Command struct {
 	// as on the relay road; a machine with a pinned key refuses without them.
 	Sig string `json:"sig,omitempty"`
 	At  int64  `json:"at,omitempty"`
-}
-
-// Pipe is the body of a TypePipe frame, both ways. The request carries Op,
-// SID and Guest; the answer carries SID, OK and TTLSec.
-type Pipe struct {
-	// Op is "invite" — the one operation this generation knows.
-	Op string `json:"op,omitempty"`
-	// SID names the transfer session: 8–32 characters of [A-Za-z0-9_-],
-	// minted by the inviting browser and handed to the guest over the
-	// Transfer tool's own signalling.
-	SID string `json:"sid"`
-	// Guest is the other browser's node key ("nodekey:<64 hex>"): admitted
-	// at the tunnel for this session only, and only to the pipe routes.
-	Guest string `json:"guest,omitempty"`
-	// OK and TTLSec are the answer: whether the session exists, and how long
-	// both sides have to attach before it is forgotten.
-	OK     bool `json:"ok,omitempty"`
-	TTLSec int  `json:"ttl_sec,omitempty"`
 }
 
 // Pair is the body of a TypePair frame: the machine's own tunnel address

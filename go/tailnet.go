@@ -29,8 +29,7 @@ package main
 // Any origin may read the answers, since none of them mean anything without a
 // key: a panel of one's own works here as it does on the tunnel.
 //
-// Off with MON_TAILNET=off. The transfer pipes do not ride this road: their
-// guests are not on the list, and the page keeps them on the tunnel.
+// Off with MON_TAILNET=off.
 
 import (
 	"context"
@@ -64,14 +63,23 @@ import (
 )
 
 const (
-	tailnetPort     = 8126
-	tailnetPoll     = time.Minute
-	tailnetSalt     = "subnsub-monitor tailnet v1"
-	tailnetConfirm  = "tailnet open confirm\n"
-	tailnetDNS      = "100.100.100.100:53"
-	tailnetMaxOpen  = 1 << 10
-	tailnetMaxSID   = 1 << 10
-	tailnetMaxRPC   = 256 << 10
+	tailnetPort    = 8126
+	tailnetPoll    = time.Minute
+	tailnetSalt    = "subnsub-monitor tailnet v1"
+	tailnetConfirm = "tailnet open confirm\n"
+	tailnetDNS     = "100.100.100.100:53"
+	tailnetMaxOpen = 1 << 10
+	tailnetMaxSID  = 1 << 10
+	// A sealed request: a command, or a piece of a file coming in (1 MiB at
+	// most on this road, base64 inside the sealed JSON; fileswrite.go). A
+	// session that has not proven its key yet (a token from /tn/open, which
+	// any caller naming an allowed key is given) is read no further than a
+	// command needs: the page's first request on one is a hello.
+	tailnetMaxRPC   = 1536 << 10
+	tailnetMaxFirst = 256 << 10
+	// How long a session already proven has to send one: a piece over a
+	// slow road outlasts the server's ten seconds.
+	tailnetRPCRead  = time.Minute
 	tailnetRecord   = 32 << 10
 	tailnetSessions = 64
 	// A session nobody has used, and how long an answer to /tn/open stays good
@@ -112,8 +120,8 @@ func tailnetOff() bool {
 	return false
 }
 
-// tailnetAdmitted is the tunnel's list less its transfer guests, read afresh, so
-// a key struck from the file is struck here on its next request.
+// tailnetAdmitted is the tunnel's list, read afresh, so a key struck from the
+// file is struck here on its next request.
 func tailnetAdmitted(k key.NodePublic) bool {
 	for _, a := range loadAllowedClients() {
 		if a == k {
@@ -555,7 +563,8 @@ func tailnetInnerOK(p string) bool {
 	switch p {
 	case "/v1/hello", "/v1/snapshot", "/v1/events", "/v1/command", "/v1/history",
 		"/v1/pty/out", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close",
-		"/v1/music", "/v1/music/index", "/v1/music/file", "/v1/music/art":
+		"/v1/music", "/v1/music/index", "/v1/music/file", "/v1/music/art",
+		"/v1/files/search", "/v1/files/file", "/v1/files/put":
 		return true
 	}
 	return false
@@ -567,7 +576,14 @@ func (t *tailnetServer) rpc(w http.ResponseWriter, r *http.Request) {
 	t.mu.Lock()
 	s := t.sessions[sid]
 	t.mu.Unlock()
-	if s == nil {
+	limit := tailnetMaxFirst
+	if s != nil {
+		// A session that has proven its key may take its time over a big
+		// request (a piece of a file); one that has not, the server's ten
+		// seconds and a command's size.
+		http.NewResponseController(w).SetReadDeadline(now.Add(tailnetRPCRead))
+		limit = tailnetMaxRPC
+	} else {
 		s = t.fromToken(sid, now)
 	}
 	// 410 asks the reader to open another: a helper that restarted knows no
@@ -576,8 +592,8 @@ func (t *tailnetServer) rpc(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusGone)
 		return
 	}
-	sealed, err := io.ReadAll(io.LimitReader(r.Body, tailnetMaxRPC+1))
-	if err != nil || len(sealed) > tailnetMaxRPC || len(sealed) < 12 {
+	sealed, err := io.ReadAll(io.LimitReader(r.Body, int64(limit)+1))
+	if err != nil || len(sealed) > limit || len(sealed) < 12 {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}

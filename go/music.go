@@ -1030,7 +1030,7 @@ type musicIndexBody struct {
 }
 
 // musicPeer is the gate every music route shares: a key on the allowlist —
-// not a transfer guest, not a portable copy — on a machine that shares.
+// not a portable copy — on a machine that shares.
 func (h *directHandler) musicPeer(w http.ResponseWriter, r *http.Request) bool {
 	k, ok := transport.PeerFromContext(r.Context())
 	if !ok {
@@ -1045,7 +1045,7 @@ func (h *directHandler) musicPeer(w http.ResponseWriter, r *http.Request) bool {
 		}
 	}
 	if !listed {
-		h.refuseFor(w, r, http.StatusForbidden, "not-allowed")
+		h.refuse(w, http.StatusForbidden, "not-allowed")
 		return false
 	}
 	if !musicOn() {

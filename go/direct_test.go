@@ -32,10 +32,6 @@ func scratchHome(t *testing.T) string {
 	os.Unsetenv(directEnvVar)
 	t.Setenv(derpMapEnvVar, "")
 	os.Unsetenv(derpMapEnvVar)
-	// The transfer pipe is on by default (pipe.go); the tests below that
-	// count capabilities were written for the observe-only hello and hold
-	// it off. pipe_test.go covers the default and the switch.
-	t.Setenv(transferEnvVar, "0")
 	return home
 }
 
@@ -671,8 +667,11 @@ func TestHistoryFoldsAndServes(t *testing.T) {
 		t.Fatalf("points = %d rows (bucket %d), want the one in progress", len(pts), sec)
 	}
 	row := pts[0]
-	if len(row) != 10 {
-		t.Fatalf("row width %d, want 10: %v", len(row), row)
+	// Ten columns, and an eleventh, the processes' names, when the sampler an
+	// earlier test started has swept /proc twice by now (every 10 s; a busy
+	// machine gets there first).
+	if len(row) != 10 && (len(row) != 11 || row[10] == nil) {
+		t.Fatalf("row width %d, want 10 (or 11 with the processes): %v", len(row), row)
 	}
 	if got := row[1].(float64); got != 80.5 {
 		t.Errorf("cpu peak = %v, want 80.5 (the series lane, not the scalar)", got)

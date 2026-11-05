@@ -27,9 +27,8 @@ package transport
 // endpoint this machine knows — the STUN-learned public ip:port and the
 // addresses of its interfaces — sealed to that peer's key, so the peer can
 // read them. That is how a direct path forms at all, and upstream has no
-// per-peer filter. Watchers are the machine's owner; a transfer guest
-// (pipe.go) is whoever the owner's browser was sending a file to, and it
-// learns them too.
+// per-peer filter. The peers are the browsers the owner allowed and the
+// portable copies the owner made (clone.go).
 //
 // Three boundaries, and where each is enforced:
 //

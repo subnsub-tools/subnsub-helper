@@ -374,8 +374,9 @@ func (h *directHandler) ptyIn(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 	rc := http.NewResponseController(w)
-	// As pipeSend: the answer must be able to go out under a body the
-	// browser has not ended.
+	// Full duplex, and no keep-alive: the answer must be able to go out
+	// under a body the browser has not ended, where the server would first
+	// try to read the rest of that body and hold the answer until then.
 	rc.EnableFullDuplex()
 	w.Header().Set("Connection", "close")
 	// The tunnel's server gives a request ten seconds to be read; a keyboard

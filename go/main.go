@@ -52,8 +52,6 @@ const usage = `subnsub-monitor — AI coding quota for machines you can't reach
   subnsub-monitor allow [KEY]            list, or add, a browser key allowed through the direct tunnel
   subnsub-monitor disallow KEY           stop serving that browser key
   subnsub-monitor address                print this machine's direct address and node key
-  subnsub-monitor transfer [on|off]      show or set whether an allowed browser may route one of its
-                                         own file transfers through this machine's tunnel
   subnsub-monitor music [on|off|add|...] show or set the music this machine shares with the browsers
                                          on its direct allowlist (tailnet and tailcat only)
   subnsub-monitor clone [use|forget]     show, save, or delete a portable terminal access copy
@@ -141,13 +139,6 @@ runs one console line there and returns its output and exit status, 'shell
 dashboard's console does, signed with keys of its own; each machine admits it
 for console lines and terminals only, and refuses it once it expires. On a
 machine, 'clones' lists the copies it admits and 'clones revoke <id>' ends one.
-
-transfer is ON by default once direct is: a browser this machine allows may
-invite one other browser, for one file transfer, to meet it here when the two
-cannot reach each other — the Transfer tool's last resort. The machine
-couples the two streams and forwards bytes it cannot read (they are encrypted
-between the browsers); the guest is admitted for that session only and can
-reach nothing but the pipe. 'transfer off' refuses new invites at once.
 
 music is OFF until 'music on' here, or until the console is: a machine whose
 console is on and which has pinned a dashboard key has music on, and that
@@ -589,7 +580,11 @@ func main() {
 		os.Exit(runShellCLI(args[1:]))
 
 	case "transfer":
-		os.Exit(runTransferCLI(args[1:]))
+		// The switch for the transfer pipe, which this build no longer has:
+		// browsers send files to each other over tailcat themselves now, and
+		// no machine couples them. Said, not refused, so a script that turns
+		// it off keeps working.
+		fmt.Println("this build has no transfer pipe: browsers send files to each other directly, so there is nothing to switch")
 
 	case "music":
 		os.Exit(runMusicCLI(args[1:]))

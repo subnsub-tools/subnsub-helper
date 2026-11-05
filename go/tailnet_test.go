@@ -324,7 +324,7 @@ func TestTailnetRejectsReplayAndTampering(t *testing.T) {
 func TestTailnetSurfaceAndStruckKey(t *testing.T) {
 	url, static, pub, ts := tnBench(t)
 	c, _ := tnOpenAs(t, url, static, pub)
-	for _, p := range []string{"/v1/pipe", "/v1/pipe/send?s=abcdefgh", "/v1/pipe/recv?s=abcdefgh", "/v1/pair", "/nope"} {
+	for _, p := range []string{"/v1/pipe", "/v1/pair", "/nope"} {
 		if inner, _ := c.call("POST", p, nil); inner != 404 {
 			t.Fatalf("%s rides this road: %d", p, inner)
 		}

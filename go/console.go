@@ -556,6 +556,10 @@ func mailboxRefusal(c consoleCmd) string {
 		// What music is shared, and a WebDAV password with it (music.go),
 		// travel the direct roads alone.
 		return "tunnel-only"
+	case "files":
+		// The Files tab (files.go): the disks are read over the tunnel the
+		// answers go back on, never through the relay.
+		return "tunnel-only"
 	}
 	return ""
 }
@@ -671,6 +675,10 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 	case "music":
 		// The shared music's roots (music.go): a pinned key, the tunnel only.
 		return runMusicCommand(c), false
+	case "files":
+		// Taken at the tunnel's command door, with its peer (direct.go):
+		// a road that reaches here has no peer to bind a token to.
+		return consoleResult{ID: c.ID, Kind: "files", Target: c.Target, Code: -1, Error: "tunnel-only"}, false
 	case "myip":
 		// The page's Exit tile (myip.go): My IP's six questions, asked from
 		// this machine's own way out — or from inside the namespace the

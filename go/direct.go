@@ -446,11 +446,9 @@ func runDirect(ctx context.Context) {
 			StateDir:   conf,
 			DERPMapURL: derpMapURL(),
 			Port:       directPort,
-			// The file, the portable copies still current (clone.go), and
-			// the guests of live transfer sessions — a guest is a peer for
-			// exactly as long as its session lives (pipe.go).
+			// The file, and the portable copies still current (clone.go).
 			Allowed: func() []key.NodePublic {
-				return append(append(loadAllowedClients(), activeCloneNodes()...), h.pipes.guests()...)
+				return append(loadAllowedClients(), activeCloneNodes()...)
 			},
 			Handler: h,
 		})
@@ -461,7 +459,6 @@ func runDirect(ctx context.Context) {
 			}
 			continue
 		}
-		h.admit = tc.AddAllowed
 		h.carrier = tc
 		setDirectAdmit(func(k key.NodePublic) {
 			if !tc.Known(k) {
@@ -484,11 +481,10 @@ func runDirect(ctx context.Context) {
 		// long as this carrier lives: the address it hands over is this one.
 		pctx, pcancel := context.WithCancel(ctx)
 		go runPairing(pctx, conf, tc)
-		serveDirect(ctx, tc, h)
+		serveDirect(ctx, tc)
 		pcancel()
 		setDirectProbe(nil)
 		setDirectAdmit(nil)
-		h.pipes.endAll()
 		tc.Close()
 		setDirectAddress("")
 		if ctx.Err() != nil {
@@ -501,9 +497,8 @@ func runDirect(ctx context.Context) {
 	}
 }
 
-// serveDirect watches the allowlist for additions until the carrier stops,
-// and sweeps the transfer sessions on the same clock.
-func serveDirect(ctx context.Context, tc *transport.Tailcat, h *directHandler) {
+// serveDirect watches the allowlist for additions until the carrier stops.
+func serveDirect(ctx context.Context, tc *transport.Tailcat) {
 	t := time.NewTicker(directAllowPoll)
 	defer t.Stop()
 	for {
@@ -516,16 +511,6 @@ func serveDirect(ctx context.Context, tc *transport.Tailcat, h *directHandler) {
 			}
 			return
 		case <-t.C:
-			h.pipes.sweep(time.Now())
-			// The carrier's WireGuard allowlist only ever grows (upstream has
-			// no removal), and every transfer guest is a line in it. Past a
-			// budget, and at a quiet moment, the carrier is rebuilt: the
-			// address survives (key, region and pre-shared key are on
-			// disk), the keys do not. Watchers see a reconnect.
-			if n := h.pipes.admittedGuests(); n >= pipeGuestRebuild && h.pipes.count() == 0 {
-				warnf("direct: rebuilding the tunnel after %d transfer guests", n)
-				return
-			}
 			for _, k := range loadAllowedClients() {
 				if !tc.Known(k) {
 					tc.AddAllowed(k)
@@ -566,12 +551,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 type directHandler struct {
 	mux     *http.ServeMux
 	carrier *transport.Tailcat
-	// The Transfer tool's sessions through this tunnel (pipe.go): the
-	// guests they admit are part of what the gate allows, and admit is how
-	// an invite tells the carrier about one (tc.AddAllowed; nil until the
-	// carrier is up, and in a test that has none).
-	pipes *pipeHub
-	admit func(key.NodePublic)
 	// The terminal's sessions (pty.go): the process's one table, not this
 	// handler's — a handler is made anew for every carrier, and a session
 	// outlives a carrier rebuild so the page can attach again by its token.
@@ -589,23 +568,12 @@ type directHandler struct {
 }
 
 func newDirectHandler() *directHandler {
-	h := &directHandler{mux: http.NewServeMux(), pipes: newPipeHub(), ptys: ptySessions}
-	h.pipes.hostOK = func(k key.NodePublic) bool {
-		for _, a := range loadAllowedClients() {
-			if a == k {
-				return true
-			}
-		}
-		return false
-	}
+	h := &directHandler{mux: http.NewServeMux(), ptys: ptySessions}
 	h.mux.HandleFunc("/v1/hello", h.hello)
 	h.mux.HandleFunc("/v1/snapshot", h.snapshot)
 	h.mux.HandleFunc("/v1/events", h.events)
 	h.mux.HandleFunc("/v1/command", h.command)
 	h.mux.HandleFunc("/v1/history", h.history)
-	h.mux.HandleFunc("/v1/pipe", h.pipeInvite)
-	h.mux.HandleFunc("/v1/pipe/send", h.pipeSend)
-	h.mux.HandleFunc("/v1/pipe/recv", h.pipeRecv)
 	h.mux.HandleFunc("/v1/pty/out", h.ptyOut)
 	h.mux.HandleFunc("/v1/pty/in", h.ptyIn)
 	h.mux.HandleFunc("/v1/pty/resize", h.ptyResize)
@@ -615,6 +583,13 @@ func newDirectHandler() *directHandler {
 	h.mux.HandleFunc("/v1/music/index", h.musicIndex)
 	h.mux.HandleFunc("/v1/music/file", h.musicFile)
 	h.mux.HandleFunc("/v1/music/art", h.musicArt)
+	// The Files tab (files.go): a search's hits and an opened file's pieces,
+	// by the token a signed command gave this peer.
+	h.mux.HandleFunc("/v1/files/search", h.filesSearch)
+	h.mux.HandleFunc("/v1/files/file", h.filesFile)
+	// A piece of a file coming in (fileswrite.go), by the token a signed
+	// put gave this peer.
+	h.mux.HandleFunc("/v1/files/put", h.filesPutPiece)
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusNotFound, "unknown-frame")
 	})
@@ -622,10 +597,11 @@ func newDirectHandler() *directHandler {
 }
 
 func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Reads are GET; the writes are POST /v1/command, the transfer invite and
-	// a transfer's send stream. Anything else is not a frame this road knows.
+	// Reads are GET; the writes are POST /v1/command, a terminal's input
+	// and the pieces of a file the Files tab puts here. Anything else is not
+	// a frame this road knows.
 	switch r.URL.Path {
-	case "/v1/command", "/v1/pipe", "/v1/pipe/send", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close":
+	case "/v1/command", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close", "/v1/files/put":
 		if r.Method != http.MethodPost {
 			h.refuse(w, http.StatusMethodNotAllowed, "unknown-frame")
 			return
@@ -636,47 +612,16 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// A transfer guest — a key admitted by an invite rather than by the
-	// allowlist file — gets the pipe it was invited to and a hello that says
-	// so, and nothing this machine knows about itself.
-	if h.guestOf(r) {
-		switch r.URL.Path {
-		case "/v1/hello", "/v1/pipe/send", "/v1/pipe/recv":
-		default:
-			h.refuseFor(w, r, http.StatusForbidden, "not-allowed")
-			return
-		}
-	}
-	h.mux.ServeHTTP(w, r)
-}
-
-// refuseFor is refuse for a request that may be a guest's: a guest's error
-// frame, like its hello, names no machine.
-func (h *directHandler) refuseFor(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if h.guestOf(r) {
-		refuseAs(w, guestAgentID, status, code)
+	// Each road gates before this (Gate on the tunnel, tailnetAdmitted per
+	// request on the tailnet); the door checks again, so a peer that is
+	// neither on the allowlist file nor a current portable copy is turned
+	// away whatever it asks, before any signature is looked at. A request
+	// with no attributed peer (a test driving the handler) has none to check.
+	if k, ok := transport.PeerFromContext(r.Context()); ok && !tailnetAdmitted(k) {
+		h.refuse(w, http.StatusForbidden, "not-allowed")
 		return
 	}
-	h.refuse(w, status, code)
-}
-
-// guestOf says whether the request's tunnel peer is a transfer guest: a key
-// the gate admitted that is NOT on the allowlist file. A request with no
-// attributed peer (a test driving the handler directly) is not a guest.
-func (h *directHandler) guestOf(r *http.Request) bool {
-	k, ok := transport.PeerFromContext(r.Context())
-	if !ok {
-		return false
-	}
-	for _, a := range loadAllowedClients() {
-		if a == k {
-			return false
-		}
-	}
-	if _, ok := cloneForNode(k, agentID(), time.Now()); ok {
-		return false
-	}
-	return true
+	h.mux.ServeHTTP(w, r)
 }
 
 // history serves the machine's own trend archive — see history.go for why it
@@ -762,11 +707,6 @@ func (h *directHandler) history(w http.ResponseWriter, r *http.Request) {
 // hello names, and re-reads it on every hello.
 func directCaps() []string {
 	caps := []string{transport.CapObserve}
-	// The transfer pipe grants nothing about this machine (pipe.go), so it
-	// needs no pinned key — only its own switch.
-	if transferEnabled() {
-		caps = append(caps, transport.CapTransfer)
-	}
 	// Commands over the tunnel need a pinned key (see command); a machine
 	// with none has no command capabilities to name, whatever its switches.
 	if !loadTrust().sealed {
@@ -809,13 +749,23 @@ func directCaps() []string {
 // music is read by the browsers on the allowlist, not by a portable copy.
 func directCapsFor(r *http.Request) []string {
 	caps := directCaps()
-	if !musicOn() {
+	music, files := musicOn(), filesOn()
+	if !music && !files {
 		return caps
 	}
 	if k, ok := transport.PeerFromContext(r.Context()); ok {
 		for _, a := range loadAllowedClients() {
 			if a == k {
-				return append(caps, transport.CapMusic)
+				if music {
+					caps = append(caps, transport.CapMusic)
+				}
+				// The Files tab's look at the disks (files.go) and its
+				// changes to them (fileswrite.go): the console's grant, to
+				// the same browsers music is.
+				if files {
+					caps = append(caps, transport.CapFiles, transport.CapFilesWrite)
+				}
+				return caps
 			}
 		}
 	}
@@ -925,6 +875,17 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 					res = consoleResult{ID: c.ID, Kind: "pty", Code: 0, Out: tok}
 				}
 			}
+		} else if c.Kind == "files" {
+			// The Files tab (files.go): this road's alone, and bound to the
+			// peer that asked — a search's and a file's tokens are good on
+			// its tunnel only. Not a portable copy's: its certificate names
+			// nothing of this.
+			if clone != nil {
+				res = consoleResult{ID: c.ID, Kind: "files", Target: c.Target, Code: -1, Error: "not-allowed"}
+			} else {
+				res = runFilesCommand(c, peer, hasPeer, commandSigner(c, id, loadTrust()))
+			}
+			releaseCmd()
 		} else {
 			res, swap = runCommand(c)
 			releaseCmd()
@@ -984,19 +945,6 @@ func refuseAs(w http.ResponseWriter, agent string, status int, code string) {
 }
 
 func (h *directHandler) helloFrame(r *http.Request) ([]byte, error) {
-	if h.guestOf(r) {
-		// A guest learns that it may pipe, and nothing else: not this
-		// machine's id, not its build. "transfer" is a fixed placeholder in
-		// the id's alphabet so the page's frame gate accepts the envelope.
-		f, err := transport.New(transport.TypeHello, guestAgentID, r.Header.Get("X-Request-Id"), transport.Hello{
-			Caps:    []string{transport.CapTransfer},
-			Carrier: "tailcat",
-		})
-		if err != nil {
-			return nil, err
-		}
-		return transport.Encode(f)
-	}
 	carrier := "tailcat"
 	if tailnetRequest(r) {
 		carrier = "tailnet"
@@ -1016,7 +964,7 @@ func (h *directHandler) helloFrame(r *http.Request) ([]byte, error) {
 func (h *directHandler) hello(w http.ResponseWriter, r *http.Request) {
 	b, err := h.helloFrame(r)
 	if err != nil {
-		h.refuseFor(w, r, http.StatusInternalServerError, "unavailable")
+		h.refuse(w, http.StatusInternalServerError, "unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1024,7 +972,7 @@ func (h *directHandler) hello(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 	// A browser that says hello here knows this node's own address: a
 	// pairing waiting for that browser is over (pairing.go).
-	if k, ok := transport.PeerFromContext(r.Context()); ok && !h.guestOf(r) {
+	if k, ok := transport.PeerFromContext(r.Context()); ok {
 		notePeerHello(k)
 	}
 }
