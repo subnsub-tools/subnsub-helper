@@ -1097,7 +1097,7 @@ func runFilesCommand(c consoleCmd, peer key.NodePublic, hasPeer bool, signer ed2
 			return res
 		}
 		out = body
-	case "speed-key", "speed-run", "speed-status", "speed-stop":
+	case "speed-key", "speed-run", "speed-net", "speed-status", "speed-stop":
 		body, code := runSpeedCommand(c.Target, signer, arg)
 		if code != "" {
 			res.Error = code

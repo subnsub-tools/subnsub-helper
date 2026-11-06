@@ -165,6 +165,10 @@ const (
 	// pinned dashboard signed (helper speedpeer.go) — where the console
 	// is on, as a copy between two computers is.
 	CapSpeedPeer = "speed-peer"
+	// CapSpeedNet: the machine measures its own road to the internet,
+	// against Cloudflare's speed test (helper speednet.go) — where the
+	// console is on, as speed-peer is.
+	CapSpeedNet = "speed-net"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on

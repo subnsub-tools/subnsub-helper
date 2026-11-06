@@ -22,6 +22,9 @@ package main
      speed-status  how it stands: the phase, the round trip and its jitter,
                    each direction's rate, the rate right now, the road.
      speed-stop    stopped, or a finished one forgotten.
+     speed-net     the road from here to the internet instead, measured
+                   against Cloudflare's speed test (speednet.go); read and
+                   stopped with the same two.
 
    WHO MAY is files' own gate (runFilesCommand): a pinned key, the console,
    the tunnel alone. A measurement is bound to the key that signed it and
@@ -107,6 +110,18 @@ type speedJob struct {
 	at     time.Time
 	end    time.Time
 	cancel context.CancelFunc
+	// A measurement to the internet (speednet.go): no key, no grant, no
+	// other machine; the edge that answered, the country it puts this
+	// machine in, the round trip under load each way, and the TCP
+	// connection as Cloudflare's end saw it.
+	net   bool
+	colo  string
+	cc    string
+	dlLat float64
+	dlJit float64
+	ulLat float64
+	ulJit float64
+	tcp   *speedTCP
 }
 
 // speedView is a measurement as speed-status tells it.
@@ -124,6 +139,15 @@ type speedView struct {
 	Secs  int     `json:"secs"`
 	T     int64   `json:"t"` // ms into the phase
 	At    int64   `json:"at"`
+	// speed-net's alone.
+	Net   bool      `json:"net,omitempty"`
+	Colo  string    `json:"colo,omitempty"`
+	Cc    string    `json:"cc,omitempty"`
+	DlLat float64   `json:"dlLat,omitempty"`
+	DlJit float64   `json:"dlJit,omitempty"`
+	UlLat float64   `json:"ulLat,omitempty"`
+	UlJit float64   `json:"ulJit,omitempty"`
+	TCP   *speedTCP `json:"tcp,omitempty"`
 }
 
 var speedJobs = struct {
@@ -170,7 +194,8 @@ func (j *speedJob) view() speedView {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	v := speedView{Job: j.job, St: j.st, Err: j.err, Road: j.road, Route: j.route, Ping: j.ping, Jit: j.jit,
-		Down: j.down, Up: j.up, Secs: j.secs, At: j.at.Unix()}
+		Down: j.down, Up: j.up, Secs: j.secs, At: j.at.Unix(),
+		Net: j.net, Colo: j.colo, Cc: j.cc, DlLat: j.dlLat, DlJit: j.dlJit, UlLat: j.ulLat, UlJit: j.ulJit, TCP: j.tcp}
 	if j.st == "down" || j.st == "up" {
 		v.Live = j.live
 	}
@@ -236,19 +261,10 @@ func runSpeedCommand(op string, signer ed25519.PublicKey, a filesArgs) (any, str
 		if a.From.Agent == fetchSelf() {
 			return nil, "bad-args"
 		}
-		for _, o := range speedJobs.m {
-			o.mu.Lock()
-			st := o.st
-			o.mu.Unlock()
-			if o != j && st != "key" && !speedFinished(st) {
-				return nil, "busy"
-			}
+		if speedBusyLocked(j) {
+			return nil, "busy"
 		}
-		secs := a.Secs
-		if secs == 0 {
-			secs = speedSecsDefault
-		}
-		secs = max(speedSecsMin, min(secs, speedSecsMax))
+		secs := speedSecsOf(a.Secs)
 		j.mu.Lock()
 		if j.st != "key" || j.by != by {
 			j.mu.Unlock()
@@ -258,6 +274,18 @@ func runSpeedCommand(op string, signer ed25519.PublicKey, a filesArgs) (any, str
 		j.from, j.grant, j.secs = fetchFrom{Agent: a.From.Agent, Addr: a.From.Addr, Tn: tn}, a.Grant, secs
 		j.st, j.at, j.phase, j.cancel = "dial", now, now, cancel
 		j.mu.Unlock()
+		go j.run(ctx)
+		return map[string]any{"job": a.Job}, ""
+
+	case "speed-net":
+		// A job id is used once: the page makes a new one for each run.
+		if j != nil || speedBusyLocked(nil) || !speedRoomLocked() {
+			return nil, "busy"
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		j = &speedJob{job: a.Job, by: by, signer: signer, net: true, secs: speedSecsOf(a.Secs),
+			st: "dial", at: now, phase: now, cancel: cancel}
+		speedJobs.m[a.Job] = j
 		go j.run(ctx)
 		return map[string]any{"job": a.Job}, ""
 
@@ -291,6 +319,27 @@ func runSpeedCommand(op string, signer ed25519.PublicKey, a filesArgs) (any, str
 	return nil, "unknown-op"
 }
 
+// speedBusyLocked: a measurement other than this one is under way here.
+func speedBusyLocked(j *speedJob) bool {
+	for _, o := range speedJobs.m {
+		o.mu.Lock()
+		st := o.st
+		o.mu.Unlock()
+		if o != j && st != "key" && !speedFinished(st) {
+			return true
+		}
+	}
+	return false
+}
+
+// speedSecsOf is the seconds each way a page asked for, within bounds.
+func speedSecsOf(secs int) int {
+	if secs == 0 {
+		secs = speedSecsDefault
+	}
+	return max(speedSecsMin, min(secs, speedSecsMax))
+}
+
 // speedDialA is the road to A for a measurement: the tailnet first, where A
 // has a listener there and this machine is on a tailnet, else tailcat.
 // Variables, so a test puts its own roads in their place.
@@ -307,7 +356,11 @@ var speedDialA = func(ctx context.Context, from fetchFrom, priv key.NodePrivate)
 }
 
 func (j *speedJob) run(ctx context.Context) {
-	st, why := j.work(ctx)
+	work := j.work
+	if j.net {
+		work = j.workNet
+	}
+	st, why := work(ctx)
 	j.mu.Lock()
 	if ctx.Err() != nil && st != "done" {
 		st, why = "stopped", ""
@@ -434,9 +487,10 @@ func (j *speedJob) work(ctx context.Context) (string, string) {
 		// (fetchtailnet.go).
 		piece = tailnetMaxFirst
 	}
+	rtt := time.Duration(p * float64(time.Millisecond))
 	j.set(func(j *speedJob) { j.st, j.phase = "up", time.Now() })
 	up, code := j.measure(ctx, dur, func(c context.Context, stop time.Time, m *speedMeter) string {
-		return speedUpStream(c, stop, hc, m, piece)
+		return speedUpStream(c, stop, hc, m, piece, rtt)
 	})
 	if code != "" {
 		return "err", code
@@ -714,8 +768,8 @@ func speedDownOnce(ctx context.Context, hc *http.Client, m *speedMeter) string {
 }
 
 // speedUpStream sends pieces until stop, each counted when A says it has
-// it, each sized to take about half a second.
-func speedUpStream(ctx context.Context, stop time.Time, hc *http.Client, m *speedMeter, most int64) string {
+// it, each sized by speedNextPiece.
+func speedUpStream(ctx context.Context, stop time.Time, hc *http.Client, m *speedMeter, most int64, rtt time.Duration) string {
 	size := int64(speedPieceMin)
 	buf := speedBuf()
 	for ctx.Err() == nil && time.Now().Before(stop) {
@@ -739,14 +793,27 @@ func speedUpStream(ctx context.Context, stop time.Time, hc *http.Client, m *spee
 			return code
 		}
 		m.piece(t0, time.Now(), n)
-		switch took := time.Since(t0); {
-		case took < 250*time.Millisecond && size < most:
-			size = min(size*2, most)
-		case took > time.Second && size > speedPieceMin:
-			size = max(size/2, speedPieceMin)
-		}
+		size = speedNextPiece(size, time.Since(t0), rtt, most)
 	}
 	return ""
+}
+
+// speedNextPiece sizes the next upload piece from how long the last one
+// took: doubled while its bytes took under a quarter of a second, halved
+// once they took over a second. A piece's time less the idle round trip is
+// what its bytes took — the answer it waits for is a round trip of nothing
+// moving — and the bounds grow with the round trip, so that on a far road
+// the wait stays a small share of each piece instead of the ceiling on the
+// rate.
+func speedNextPiece(size int64, took, rtt time.Duration, most int64) int64 {
+	moving := took - rtt
+	switch {
+	case moving < max(250*time.Millisecond, 2*rtt) && size < most:
+		return min(size*2, most)
+	case moving > max(time.Second, 4*rtt) && size > speedPieceMin:
+		return max(size/2, speedPieceMin)
+	}
+	return size
 }
 
 func speedUpOnce(ctx context.Context, hc *http.Client, body []byte) (int64, string) {

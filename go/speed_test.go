@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,7 +73,7 @@ func TestSpeedEndpoints(t *testing.T) {
 	fr, _ := transport.Decode(rec.Body.Bytes())
 	var hello transport.Hello
 	json.Unmarshal(fr.Body, &hello)
-	if !containsStr(hello.Caps, transport.CapSpeed) || !containsStr(hello.Caps, transport.CapSpeedPeer) {
+	if !containsStr(hello.Caps, transport.CapSpeed) || !containsStr(hello.Caps, transport.CapSpeedPeer) || !containsStr(hello.Caps, transport.CapSpeedNet) {
 		t.Fatalf("hello caps: %v", hello.Caps)
 	}
 }
@@ -431,3 +432,172 @@ func TestSpeedMeterShare(t *testing.T) {
 }
 
 var _ = io.Discard
+
+// fakeCloudflare answers as speed.cloudflare.com does, for the paths a
+// measurement to the internet uses: a trace, downloads, uploads, each with
+// Cloudflare's server timing.
+func fakeCloudflare(t *testing.T, down func(w http.ResponseWriter, n int)) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	upBytes := new(atomic.Int64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Server-Timing", "cfSpeedEdge;dur=1, cfSpeedWorker;dur=2")
+		w.Header().Add("Server-Timing", `cfL4;desc="?proto=TCP&rtt=1200&min_rtt=900&rtt_var=300&sent=40&recv=6&lost=0&retrans=2&sent_bytes=2859"`)
+		switch r.URL.Path {
+		case "/cdn-cgi/trace":
+			io.WriteString(w, "fl=1\nh=speed.cloudflare.com\nip=203.0.113.9\ncolo=SJC\nloc=US\nhttp=http/1.1\n")
+		case "/__down":
+			n, _ := strconv.Atoi(r.URL.Query().Get("bytes"))
+			down(w, n)
+		case "/__up":
+			b, _ := io.Copy(io.Discard, r.Body)
+			upBytes.Add(b)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, upBytes
+}
+
+// This machine measures its own road to the internet: where it lands, the
+// round trip idle and under load, each direction, the TCP connection —
+// and never the address the trace said.
+func TestSpeedNetRun(t *testing.T) {
+	f := newGrantFixture(t)
+	speedReset()
+	oldBase, oldSec := speedNetBase, speedSecond
+	t.Cleanup(func() { speedReset(); speedNetBase, speedSecond = oldBase, oldSec })
+	speedSecond = 150 * time.Millisecond
+	srv, up := fakeCloudflare(t, func(w http.ResponseWriter, n int) {
+		w.Header().Set("Content-Length", strconv.Itoa(n))
+		buf := make([]byte, 32<<10)
+		for n > 0 {
+			k := min(n, len(buf))
+			if _, err := w.Write(buf[:k]); err != nil {
+				return
+			}
+			n -= k
+		}
+	})
+	speedNetBase = srv.URL
+
+	if r := f.command(t, f.peer, "speed-net", map[string]any{"job": "net-0001", "secs": 3}); r.Code != 0 {
+		t.Fatalf("speed-net: %+v", r)
+	}
+	// One at a time, and a job id is used once.
+	if r := f.command(t, f.peer, "speed-net", map[string]any{"job": "net-0002"}); r.Error != "busy" {
+		t.Fatalf("a second measurement at once: %+v", r)
+	}
+	if r := f.command(t, f.peer, "speed-key", map[string]string{"job": "net-0001"}); r.Error != "busy" {
+		t.Fatalf("a key for a measurement to the internet: %+v", r)
+	}
+	var v speedView
+	filesWaitFor(t, "the measurement to end", func() bool {
+		v = speedStatus(t, f, "net-0001")
+		return speedFinished(v.St)
+	})
+	if v.St != "done" || !v.Net || v.Colo != "SJC" || v.Cc != "US" || v.Down <= 0 || v.Up <= 0 || v.Ping <= 0 {
+		t.Fatalf("finished: %+v", v)
+	}
+	if v.DlLat <= 0 || v.UlLat <= 0 {
+		t.Fatalf("no round trip under load: %+v", v)
+	}
+	if v.TCP == nil || v.TCP.Rtt != 1200 || v.TCP.Min != 900 || v.TCP.Retrans != 2 || v.TCP.Sent != 40 {
+		t.Fatalf("tcp %+v", v.TCP)
+	}
+	if up.Load() <= 0 {
+		t.Fatal("nothing went up")
+	}
+	r := f.command(t, f.peer, "speed-status", map[string]string{"job": "net-0001"})
+	if strings.Contains(r.Out, "203.0.113.9") {
+		t.Fatalf("the address was kept: %s", r.Out)
+	}
+	// After it, another may go.
+	if r := f.command(t, f.peer, "speed-net", map[string]any{"job": "net-0003", "secs": 3}); r.Code != 0 {
+		t.Fatalf("speed-net after the first: %+v", r)
+	}
+	if r := f.command(t, f.peer, "speed-stop", map[string]string{"job": "net-0003"}); r.Code != 0 {
+		t.Fatal(r)
+	}
+	filesWaitFor(t, "the stopped one to end", func() bool {
+		v = speedStatus(t, f, "net-0003")
+		return speedFinished(v.St)
+	})
+	if v.St != "stopped" {
+		t.Fatalf("stopped: %+v", v)
+	}
+}
+
+// Cloudflare saying no is said as such.
+func TestSpeedNetRefused(t *testing.T) {
+	f := newGrantFixture(t)
+	speedReset()
+	oldBase, oldSec := speedNetBase, speedSecond
+	t.Cleanup(func() { speedReset(); speedNetBase, speedSecond = oldBase, oldSec })
+	speedSecond = 100 * time.Millisecond
+	srv, _ := fakeCloudflare(t, func(w http.ResponseWriter, n int) {
+		if n == 0 {
+			return
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	speedNetBase = srv.URL
+	if r := f.command(t, f.peer, "speed-net", map[string]any{"job": "net-0004", "secs": 3}); r.Code != 0 {
+		t.Fatalf("speed-net: %+v", r)
+	}
+	var v speedView
+	filesWaitFor(t, "the measurement to end", func() bool {
+		v = speedStatus(t, f, "net-0004")
+		return speedFinished(v.St)
+	})
+	if v.St != "err" || v.Err != "net-refused" {
+		t.Fatalf("refused: %+v", v)
+	}
+}
+
+func TestSpeedNetTiming(t *testing.T) {
+	if ms := speedNetServerMs("cfSpeedEdge;dur=3, cfSpeedWorker;dur=21"); ms != 24 {
+		t.Fatalf("summed %v", ms)
+	}
+	if ms := speedNetServerMs("cfRequestDuration;dur=7.5, cfSpeedWorker;dur=21"); ms != 7.5 {
+		t.Fatalf("request duration %v", ms)
+	}
+	if ms := speedNetServerMs(""); ms != 0 {
+		t.Fatalf("none %v", ms)
+	}
+	tcp := speedNetL4(`cfSpeedEdge;dur=3, cfL4;desc="?proto=TCP&rtt=995&min_rtt=964&retrans=0&sent=4"`)
+	if tcp == nil || tcp.Rtt != 995 || tcp.Min != 964 || tcp.Retrans != 0 || tcp.Sent != 4 {
+		t.Fatalf("l4 %+v", tcp)
+	}
+	if speedNetL4(`cfL4;desc="?proto=QUIC&rtt=995"`) != nil {
+		t.Fatal("QUIC read as TCP")
+	}
+}
+
+// An upload piece grows on a far road too: the round trip it waits for is
+// not counted as its bytes moving.
+func TestSpeedNextPiece(t *testing.T) {
+	ms := time.Millisecond
+	// Near: as before.
+	if n := speedNextPiece(64<<10, 100*ms, ms, 4<<20); n != 128<<10 {
+		t.Fatalf("near, quick: %d", n)
+	}
+	if n := speedNextPiece(1<<20, 1500*ms, ms, 4<<20); n != 512<<10 {
+		t.Fatalf("near, slow: %d", n)
+	}
+	// 300 ms away, a piece that took 310 ms moved its bytes in 10: it grows.
+	if n := speedNextPiece(64<<10, 310*ms, 300*ms, 16<<20); n != 128<<10 {
+		t.Fatalf("far, quick: %d", n)
+	}
+	// 300 ms away, 800 ms of bytes moving is under 4 round trips: kept.
+	if n := speedNextPiece(4<<20, 1100*ms, 300*ms, 16<<20); n != 4<<20 {
+		t.Fatalf("far, steady: %d", n)
+	}
+	// Never past the bounds.
+	if n := speedNextPiece(16<<20, 310*ms, 300*ms, 16<<20); n != 16<<20 {
+		t.Fatalf("at the top: %d", n)
+	}
+	if n := speedNextPiece(speedPieceMin, 5*time.Second, ms, 4<<20); n != speedPieceMin {
+		t.Fatalf("at the bottom: %d", n)
+	}
+}

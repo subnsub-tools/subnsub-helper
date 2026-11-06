@@ -792,6 +792,8 @@ func directCapsFor(r *http.Request) []string {
 					// (speedpeer.go): run from here, or measured here under
 					// a grant — the console's grant, as a copy's is.
 					caps = append(caps, transport.CapSpeedPeer)
+					// Its own road to the internet (speednet.go).
+					caps = append(caps, transport.CapSpeedNet)
 				}
 				return caps
 			}
