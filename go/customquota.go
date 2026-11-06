@@ -123,7 +123,7 @@ type quotaWindowSpec struct {
 	resets *float64 `json:"-"`
 }
 
-// One window as the tile carries it (and as `subnsub-monitor metrics`
+// One window as the tile carries it (and as `subnsub-helper metrics`
 // prints it): the same thing a Limit says, before it is one.
 type QuotaWindow struct {
 	Key         string   `json:"key"`
@@ -406,7 +406,7 @@ func quotaProvider(tile Tile, t float64) Provider {
 	return p
 }
 
-// What `subnsub-monitor metrics` prints for a quota tile.
+// What `subnsub-helper metrics` prints for a quota tile.
 func quotaValueText(t Tile) string {
 	if t.Fail != "" {
 		return "error · " + t.Fail

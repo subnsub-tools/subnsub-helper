@@ -11,7 +11,7 @@ package main
 // It is not a switch: wherever /proc shows other processes
 // the names are read, kept beside the CPU history and served over the tunnel.
 // The marker file and MON_DIAGNOSTICS that used to decide it are ignored;
-// `subnsub-monitor diagnostics` only reports.
+// `subnsub-helper diagnostics` only reports.
 
 import (
 	"os"

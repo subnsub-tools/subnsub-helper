@@ -17,7 +17,7 @@ package main
 //     reach its disk's files). Its page may look through the machine's
 //     folders when somebody opens them there, and share the one chosen
 //     (browse, add-dir); only then is that folder walked.
-//   - Elsewhere the folders are chosen here: `subnsub-monitor music add
+//   - Elsewhere the folders are chosen here: `subnsub-helper music add
 //     <dir>` (or --music-dir on the install line), after `music on` (or
 //     --music). A dashboard whose key this machine has pinned may add WebDAV
 //     folders (musicdav.go) and take any root away, but it cannot look
@@ -1827,7 +1827,7 @@ func runMusicCLI(args []string) int {
 			}
 		}
 		if !musicOnConf(conf) {
-			fmt.Println("note: music is off; 'subnsub-monitor music on' shares what is listed")
+			fmt.Println("note: music is off; 'subnsub-helper music on' shares what is listed")
 		}
 		if rc := save(); rc >= 0 {
 			return rc
@@ -1864,7 +1864,7 @@ func runMusicCLI(args []string) int {
 		}
 		fmt.Println("the running helper reads every shared folder again within a few seconds")
 	default:
-		warnf("usage: subnsub-monitor music [on [FOLDER...] | off | add FOLDER... | add-webdav URL [--user NAME] [--name LABEL] [--pin sha256:HEX] | remove ID | rescan]")
+		warnf("usage: subnsub-helper music [on [FOLDER...] | off | add FOLDER... | add-webdav URL [--user NAME] [--name LABEL] [--pin sha256:HEX] | remove ID | rescan]")
 		return 2
 	}
 	on := musicOnConf(conf)
@@ -1893,9 +1893,9 @@ func runMusicCLI(args []string) int {
 	if len(conf.Roots) == 0 {
 		switch {
 		case musicByConsole():
-			fmt.Println("nothing shared, and nothing read: choose a folder on the Monitor page, or 'subnsub-monitor music add <folder>' here")
+			fmt.Println("nothing shared, and nothing read: choose a folder on the Monitor page, or 'subnsub-helper music add <folder>' here")
 		default:
-			fmt.Println("nothing shared, and nothing read: 'subnsub-monitor music add <folder>' names one")
+			fmt.Println("nothing shared, and nothing read: 'subnsub-helper music add <folder>' names one")
 		}
 	}
 	return 0
@@ -1964,7 +1964,7 @@ func runMusicDavCLI(conf *musicConf, args []string) int {
 	}
 	conf.Roots = append(conf.Roots, musicRootConf{ID: musicNewID(), Kind: "webdav", URL: d.base.String(), User: user, Pass: pass, Pin: d.pin, Name: name})
 	if !musicOnConf(*conf) {
-		fmt.Println("note: music is off; 'subnsub-monitor music on' shares what is listed")
+		fmt.Println("note: music is off; 'subnsub-helper music on' shares what is listed")
 	}
 	if err := saveMusicConf(*conf); err != nil {
 		warnf("could not save the music settings: %v", err)

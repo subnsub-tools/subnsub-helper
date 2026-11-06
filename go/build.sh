@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cross-compile subnsub-monitor for every target install.sh knows how to fetch.
+# Cross-compile subnsub-helper for every target install.sh knows how to fetch.
 #
 #   sh go/build.sh [OUTDIR]     (default: go/dist)
 #
@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 out="${1:-dist}"
 mkdir -p "$out"
 # Clear what a previous run left so removed targets do not linger in dist/.
-rm -f "$out"/subnsub-monitor-* "$out/SHA256SUMS"
+rm -f "$out"/subnsub-helper-* "$out"/subnsub-monitor-* "$out/SHA256SUMS"
 
 # The helper links tailcat (direct mode, see direct.go), which uses Go 1.27.
 # A driver as old as 1.21 can still build it — go.mod
@@ -39,7 +39,9 @@ done
 #
 # The NAMES matter as much as the list: a helper asked to update itself builds
 # the asset name from its own runtime.GOOS and runtime.GOARCH, so
-# `subnsub-monitor-<goos>-<goarch>` is not a convention here, it is the protocol.
+# `subnsub-helper-<goos>-<goarch>` is not a convention here, it is the protocol.
+# (A helper from before the rename asks for subnsub-monitor-<goos>-<goarch>;
+# release.sh publishes the same bytes under that name too.)
 #
 # linux/arm is built for ARMv7 explicitly. Left to the default the toolchain
 # targets ARMv6, which runs on a Pi 1 and gives up the atomics and the barrier
@@ -69,7 +71,7 @@ for target in linux/amd64 linux/arm64 linux/arm \
     arch=${target#*/}
     ext=""
     [ "$os" = windows ] && ext=".exe"
-    bin="$out/subnsub-monitor-$os-$arch$ext"
+    bin="$out/subnsub-helper-$os-$arch$ext"
     goarm=""
     [ "$arch" = arm ] && goarm=7
     # CGO off so the Linux builds are genuinely static — a helper that needs a
@@ -83,6 +85,6 @@ done
 
 # Checksums, so install.sh can grow a verification step and so a published
 # release has something to compare against.
-( cd "$out" && sha256sum subnsub-monitor-* > SHA256SUMS 2>/dev/null \
-  || shasum -a 256 subnsub-monitor-* > SHA256SUMS )
+( cd "$out" && sha256sum subnsub-helper-* > SHA256SUMS 2>/dev/null \
+  || shasum -a 256 subnsub-helper-* > SHA256SUMS )
 echo "wrote $out/SHA256SUMS"

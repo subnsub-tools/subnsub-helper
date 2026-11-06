@@ -2,7 +2,7 @@ package main
 
 // The calls into IOKit, and nothing else. mactemps.go says why they are made
 // from a child process and what is done with the answers; this file is only
-// ever run as `subnsub-monitor temps`.
+// ever run as `subnsub-helper temps`.
 //
 // purego rather than cgo: build.sh's binaries are CGO_ENABLED=0 and cross-
 // compiled from Linux, and purego reaches a dynamic library from exactly that

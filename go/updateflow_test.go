@@ -41,7 +41,7 @@ func newRelease(t *testing.T, version, script string) *fakeRelease {
 	t.Helper()
 	r := &fakeRelease{version: version, binary: []byte(script), hits: map[string]int{}}
 	sum := sha256.Sum256(r.binary)
-	asset := "subnsub-monitor-" + runtime.GOOS + "-" + runtime.GOARCH
+	asset := "subnsub-helper-" + runtime.GOOS + "-" + runtime.GOARCH
 	r.sums = hex.EncodeToString(sum[:]) + "  " + asset + "\n"
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.hits[req.URL.Path]++
@@ -69,7 +69,7 @@ func versionScript(v string) string {
 // An installed helper: a file at a path, with the old contents.
 func installed(t *testing.T) string {
 	t.Helper()
-	self := filepath.Join(t.TempDir(), "subnsub-monitor")
+	self := filepath.Join(t.TempDir(), "subnsub-helper")
 	if err := os.WriteFile(self, []byte(versionScript("0001.01.01.1")), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestUpdateInstallsAVerifiedRelease(t *testing.T) {
 	// Nothing staged is left lying around next to the binary.
 	ents, _ := os.ReadDir(filepath.Dir(self))
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), ".subnsub-monitor-") {
+		if strings.HasPrefix(e.Name(), ".subnsub-helper-") {
 			t.Fatalf("left a staged file behind: %s", e.Name())
 		}
 	}
@@ -200,7 +200,7 @@ func TestUpdateRefusesAChecksumMismatch(t *testing.T) {
 	rel := newRelease(t, "2999.12.31.9", versionScript("2999.12.31.9"))
 	// The manifest now describes something else — the shape of a swapped
 	// binary, or of a bucket where one object was replaced and one was not.
-	rel.sums = strings.Repeat("a", 64) + "  subnsub-monitor-" +
+	rel.sums = strings.Repeat("a", 64) + "  subnsub-helper-" +
 		runtime.GOOS + "-" + runtime.GOARCH + "\n"
 
 	res, swap := updateFrom("cmd1", self, rel.srv.URL)
@@ -224,7 +224,7 @@ func TestUpdateRefusesAChecksumMismatch(t *testing.T) {
 // Only forward. A bucket serving an older version is a rollback nobody asked
 // this button for, and it must not cost a download either.
 func TestUpdateWillNotGoBackwardsOrSideways(t *testing.T) {
-	asset := "subnsub-monitor-" + runtime.GOOS + "-" + runtime.GOARCH
+	asset := "subnsub-helper-" + runtime.GOOS + "-" + runtime.GOARCH
 	for _, v := range []string{"0000.01.01.1", helperVersion} {
 		self := installed(t)
 		rel := newRelease(t, v, versionScript(v))
@@ -291,7 +291,7 @@ func TestUpdateRefusesABinaryThatWillNotRunOrLies(t *testing.T) {
 // is held to. Anything that is not digits and dots stops the whole thing here,
 // before a single byte of payload has been requested.
 func TestUpdateRefusesAnUnusablePublishedVersion(t *testing.T) {
-	asset := "subnsub-monitor-" + runtime.GOOS + "-" + runtime.GOARCH
+	asset := "subnsub-helper-" + runtime.GOOS + "-" + runtime.GOARCH
 	self := installed(t)
 	rel := newRelease(t, "../../../etc/passwd", versionScript("2999.12.31.9"))
 	res, swap := updateFrom("cmd1", self, rel.srv.URL)
@@ -311,7 +311,7 @@ func TestUpdateRefusesAnUnusablePublishedVersion(t *testing.T) {
 func TestUpdateSaysSoWhenThisPlatformHasNoBuild(t *testing.T) {
 	self := installed(t)
 	rel := newRelease(t, "2999.12.31.9", versionScript("2999.12.31.9"))
-	rel.sums = strings.Repeat("b", 64) + "  subnsub-monitor-plan9-mips\n"
+	rel.sums = strings.Repeat("b", 64) + "  subnsub-helper-plan9-mips\n"
 	res, swap := updateFrom("cmd1", self, rel.srv.URL)
 	if swap {
 		t.Fatal("swapped")

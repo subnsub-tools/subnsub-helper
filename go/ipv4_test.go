@@ -63,7 +63,7 @@ func TestIPv4Source(t *testing.T) {
 }
 
 func TestIPv4Parse(t *testing.T) {
-	trace := "fl=123abc\nh=www.cloudflare.com\nip=104.28.163.142\nts=1760000000.123\nvisit_scheme=https\nuag=subnsub-monitor/x\ncolo=NRT\nsliver=none\nhttp=http/2\nloc=JP\ntls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n"
+	trace := "fl=123abc\nh=www.cloudflare.com\nip=104.28.163.142\nts=1760000000.123\nvisit_scheme=https\nuag=subnsub-helper/x\ncolo=NRT\nsliver=none\nhttp=http/2\nloc=JP\ntls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n"
 	for name, c := range map[string]struct{ in, addr, cc string }{
 		"trace":            {trace, "104.28.163.142", "JP"},
 		"trace, unplaced":  {"ip=8.8.8.8\nloc=XX\n", "8.8.8.8", ""},

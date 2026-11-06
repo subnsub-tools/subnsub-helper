@@ -177,7 +177,7 @@ func TestPushCollectAndSocket(t *testing.T) {
 	if len(sources) != 2 || sources[1].ID != pushSourceID || !sources[1].OK || sources[1].LastOKAt == nil {
 		t.Fatalf("sources: %+v", sources)
 	}
-	// What `subnsub-monitor metrics` would show for the running helper.
+	// What `subnsub-helper metrics` would show for the running helper.
 	if live := pushedFromSocket(); len(live) != 2 {
 		t.Fatalf("pushedFromSocket: %+v", live)
 	}

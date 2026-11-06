@@ -39,7 +39,7 @@ var errSupervisorOwnsRestart = errors.New("the service manager restarts this hel
 // os.Executable() cannot be asked afterwards. On Linux it reads
 // /proc/self/exe, and the rename that installs the new binary unhashes the
 // dentry this process was executed from, so the answer comes back as
-// "/path/to/subnsub-monitor (deleted)" — a path that cannot be executed. The
+// "/path/to/subnsub-helper (deleted)" — a path that cannot be executed. The
 // updater holds the right answer at the moment it still means something, and
 // says so here rather than leaving the restart to guess.
 var (

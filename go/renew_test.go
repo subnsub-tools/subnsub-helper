@@ -154,7 +154,7 @@ func TestPickTokenRefusesAnotherAccountsToken(t *testing.T) {
 func TestStoredTokenIsScopedToItsRelay(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	conf := filepath.Join(dir, ".config", "subnsub-monitor")
+	conf := filepath.Join(dir, ".config", "subnsub-helper")
 	if err := os.MkdirAll(conf, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestSaveTokenLeavesNoTempFileBehind(t *testing.T) {
 	if err := saveToken(officialRelay, fakeToken(time.Now().Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
-	stale := filepath.Join(dir, ".config", "subnsub-monitor", tokenFile+".new")
+	stale := filepath.Join(dir, ".config", "subnsub-helper", tokenFile+".new")
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Error("the staging file must not survive a successful save — it holds a bearer secret")
 	}
@@ -633,7 +633,7 @@ func writeTokenFile(t *testing.T, body string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".config", "subnsub-monitor")
+	dir := filepath.Join(home, ".config", "subnsub-helper")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +716,7 @@ func TestInstalledEnvRefusesWhatItCannotVouchFor(t *testing.T) {
 	// A directory where the file should be.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if err := os.MkdirAll(filepath.Join(home, ".config", "subnsub-monitor", "token"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, ".config", "subnsub-helper", "token"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if env := installedEnv(); len(env) != 0 {

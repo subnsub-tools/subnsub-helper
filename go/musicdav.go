@@ -169,7 +169,7 @@ func (d *davRoot) do(ctx context.Context, req *http.Request) (*http.Response, er
 	if d.user != "" || d.pass != "" {
 		req.SetBasicAuth(d.user, d.pass)
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor/"+helperVersion)
+	req.Header.Set("User-Agent", "subnsub-helper/"+helperVersion)
 	resp, err := d.client.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, d.classify(ctx, err)

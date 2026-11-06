@@ -262,7 +262,7 @@ func fetchClaude() Provider {
 	}
 	req.Header.Set("Authorization", "Bearer "+auth.token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 
 	// Refuse redirects. Go's default client re-sends the request to whatever
 	// Location names and, for a same-host hop, carries Authorization along —

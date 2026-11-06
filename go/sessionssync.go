@@ -1,7 +1,7 @@
 package main
 
 // Pushing this machine's coding-agent sessions to the account's archive —
-// `subnsub-monitor sessions sync`.
+// `subnsub-helper sessions sync`.
 //
 // sessions.go and sessionsread.go answer QUESTIONS: the dashboard asks over the
 // console channel, this machine reads its own transcripts, and an answer comes
@@ -801,7 +801,7 @@ func syncPost(client *http.Client, base, token string, body []byte) syncVerdict 
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	resp, err := client.Do(req)
 	if err != nil {
 		return syncRetry
@@ -985,7 +985,7 @@ func runSessionsSyncCLI(rest []string) int {
 		case "off", "0", "false", "no":
 			set = "off"
 		default:
-			warnf("usage: subnsub-monitor sessions sync [on|off] [--dry-run] [--json]")
+			warnf("usage: subnsub-helper sessions sync [on|off] [--dry-run] [--json]")
 			return 2
 		}
 	}
@@ -1040,7 +1040,7 @@ func runSessionsSyncCLI(rest []string) int {
 		fmt.Printf("pending:  %d transcripts, %s to send\n", pendingFiles, syncHuman(pendingBytes))
 	}
 	if !on {
-		fmt.Println("\nturn it on with:  subnsub-monitor sessions sync on")
+		fmt.Println("\nturn it on with:  subnsub-helper sessions sync on")
 		fmt.Println("with it on, this machine's agent conversations are parsed, redacted and")
 		fmt.Println("sent to your account's archive, where the dashboard can search and read")
 		fmt.Println("them even when this machine is offline. off is the default and off stays off.")

@@ -1,7 +1,7 @@
 package main
 
 // Searching THIS machine's coding-agent sessions, when the dashboard's fleet
-// search asks over the console channel — `subnsub-monitor sessions search`.
+// search asks over the console channel — `subnsub-helper sessions search`.
 //
 // A machine that granted the console has already granted arbitrary /bin/sh as
 // this user, so the fleet search rides that one channel and nothing more
@@ -358,7 +358,7 @@ func runSessionsSearchCLI(rest []string) int {
 	// decides the term a snippet is cut around.
 	q.terms = append(q.terms, sessTerms(strings.Join(parts, " "))...)
 	if q.empty() {
-		warnf("usage: subnsub-monitor sessions search [--limit N] [--project NAME] [--since WHEN] [--until WHEN]")
+		warnf("usage: subnsub-helper sessions search [--limit N] [--project NAME] [--since WHEN] [--until WHEN]")
 		warnf("       [--term TEXT] [--not TEXT] [--re PATTERN] [--not-re PATTERN] [--json] [--] TEXT...")
 		warnf("a search needs something to look FOR: exclusions alone would match every message ever written")
 		return 2

@@ -1,13 +1,13 @@
 # Example `metrics.d` files
 
-Each file here is a ready-to-use source for `~/.config/subnsub-monitor/metrics.d/`. Copy
-the ones that match your machine, test them with `subnsub-monitor metrics`, and
+Each file here is a ready-to-use source for `~/.config/subnsub-helper/metrics.d/`. Copy
+the ones that match your machine, test them with `subnsub-helper metrics`, and
 their tiles will appear on the next report without restarting the helper:
 
 ```sh
-mkdir -p ~/.config/subnsub-monitor/metrics.d
-cp nvidia-gpu.json ~/.config/subnsub-monitor/metrics.d/
-subnsub-monitor metrics          # runs every command once and prints the tiles
+mkdir -p ~/.config/subnsub-helper/metrics.d
+cp nvidia-gpu.json ~/.config/subnsub-helper/metrics.d/
+subnsub-helper metrics          # runs every command once and prints the tiles
 ```
 
 See [Custom metrics (`metrics.d`)](../README.md#custom-metrics-metricsd) in the main README for the full schema reference. Every
@@ -40,7 +40,7 @@ from the tiles whose trend you do not need.
 nothing else, then check with `sudo -n smartctl --scan`:
 
 ```
-# /etc/sudoers.d/subnsub-monitor-smart   (replace `me` with the helper's user)
+# /etc/sudoers.d/subnsub-helper-smart   (replace `me` with the helper's user)
 me ALL=(root) NOPASSWD: /usr/sbin/smartctl --scan, /usr/sbin/smartctl -H /dev/*
 ```
 
@@ -56,13 +56,13 @@ Billing: Read — for one account, kept in a file only the helper's user can
 read:
 
 ```sh
-install -m 600 /dev/null ~/.config/subnsub-monitor/cloudflare.env
-cat >> ~/.config/subnsub-monitor/cloudflare.env <<'END'
+install -m 600 /dev/null ~/.config/subnsub-helper/cloudflare.env
+cat >> ~/.config/subnsub-helper/cloudflare.env <<'END'
 CF_API_TOKEN=your-token
 CF_ACCOUNT_ID=your-account-id
 CF_BUDGET=10
 END
-sh ~/.config/subnsub-monitor/metrics.d/cloudflare-bill.sh   # prints the reading
+sh ~/.config/subnsub-helper/metrics.d/cloudflare-bill.sh   # prints the reading
 ```
 
 `CF_BUDGET` (US dollars a billing period) is the bill row's total;
@@ -82,5 +82,5 @@ a pool and its trend starts over.
 Any of these tiles can be pinned to the folded status bar from the card's
 Edit menu, just like the built-in readings.
 
-If a tool's output format differs on your system, run `subnsub-monitor metrics`
+If a tool's output format differs on your system, run `subnsub-helper metrics`
 to inspect the raw output and any parsing errors.

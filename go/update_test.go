@@ -79,25 +79,25 @@ func TestValidVersionMatchesTheRelaysShapeExactly(t *testing.T) {
 // the name has to match exactly and the hash has to look like one.
 func TestSumForMatchesTheWholeNameOnly(t *testing.T) {
 	manifest := "" +
-		"aaaa000000000000000000000000000000000000000000000000000000000001  subnsub-monitor-linux-amd64\n" +
-		"aaaa000000000000000000000000000000000000000000000000000000000002  subnsub-monitor-linux-arm64\n" +
-		"aaaa000000000000000000000000000000000000000000000000000000000003 *subnsub-monitor-darwin-arm64\n" +
+		"aaaa000000000000000000000000000000000000000000000000000000000001  subnsub-helper-linux-amd64\n" +
+		"aaaa000000000000000000000000000000000000000000000000000000000002  subnsub-helper-linux-arm64\n" +
+		"aaaa000000000000000000000000000000000000000000000000000000000003 *subnsub-helper-darwin-arm64\n" +
 		"SHA256SUMS\n"
 
-	if got := sumFor(manifest, "subnsub-monitor-linux-arm64"); !strings.HasSuffix(got, "02") {
+	if got := sumFor(manifest, "subnsub-helper-linux-arm64"); !strings.HasSuffix(got, "02") {
 		t.Fatalf("exact name: %q", got)
 	}
 	// The '*' marker sha256sum writes for a binary read is part of the format,
 	// not part of the name.
-	if got := sumFor(manifest, "subnsub-monitor-darwin-arm64"); !strings.HasSuffix(got, "03") {
+	if got := sumFor(manifest, "subnsub-helper-darwin-arm64"); !strings.HasSuffix(got, "03") {
 		t.Fatalf("binary marker: %q", got)
 	}
 	// A PREFIX of a listed name must not match. These two differ by one
 	// character in the field that decides which bytes get installed.
-	if got := sumFor(manifest, "subnsub-monitor-linux-arm"); got != "" {
+	if got := sumFor(manifest, "subnsub-helper-linux-arm"); got != "" {
 		t.Fatalf("prefix matched: %q", got)
 	}
-	if got := sumFor(manifest, "subnsub-monitor-windows-amd64"); got != "" {
+	if got := sumFor(manifest, "subnsub-helper-windows-amd64"); got != "" {
 		t.Fatalf("absent name matched: %q", got)
 	}
 }
@@ -108,12 +108,12 @@ func TestSumForMatchesTheWholeNameOnly(t *testing.T) {
 // release manifest is broken".
 func TestSumForRefusesAHashThatIsNotOne(t *testing.T) {
 	for _, m := range []string{
-		"nothex  subnsub-monitor-linux-amd64\n",
-		"aaaa  subnsub-monitor-linux-amd64\n",
-		"gggg000000000000000000000000000000000000000000000000000000000001  subnsub-monitor-linux-amd64\n",
-		"aaaa000000000000000000000000000000000000000000000000000000000001 extra field  subnsub-monitor-linux-amd64\n",
+		"nothex  subnsub-helper-linux-amd64\n",
+		"aaaa  subnsub-helper-linux-amd64\n",
+		"gggg000000000000000000000000000000000000000000000000000000000001  subnsub-helper-linux-amd64\n",
+		"aaaa000000000000000000000000000000000000000000000000000000000001 extra field  subnsub-helper-linux-amd64\n",
 	} {
-		if got := sumFor(m, "subnsub-monitor-linux-amd64"); got != "" {
+		if got := sumFor(m, "subnsub-helper-linux-amd64"); got != "" {
 			t.Fatalf("accepted %q from %q", got, m)
 		}
 	}

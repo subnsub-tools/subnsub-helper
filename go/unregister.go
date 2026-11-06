@@ -47,7 +47,7 @@ func unregisterMachine(relay string, client *http.Client) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	if client == nil {
 		client = &http.Client{
 			Timeout:   unregisterTimeout,

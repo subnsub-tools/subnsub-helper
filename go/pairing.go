@@ -272,7 +272,7 @@ func runPairing(ctx context.Context, conf string, tc *transport.Tailcat) {
 	}
 }
 
-// pairingStatusLine is what `subnsub-monitor address` says of a pairing still
+// pairingStatusLine is what `subnsub-helper address` says of a pairing still
 // on disk, or "" when there is none. The running helper removes the file once
 // the browser has the address, so a file here is a pairing not yet done.
 func pairingStatusLine(conf string, now time.Time) string {

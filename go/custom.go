@@ -11,7 +11,7 @@ package main
 //
 // The input is a directory of JSON files the operator owns:
 //
-//   ~/.config/subnsub-monitor/metrics.d/*.json
+//   ~/.config/subnsub-helper/metrics.d/*.json
 //
 // Each file is one SOURCE (its stem is the source id the dashboard groups
 // errors under) and holds tiles:
@@ -79,8 +79,8 @@ package main
 //
 // The directory is re-read whenever a file changes; a broken file keeps its
 // last good tiles and flags the source as bad-config, and
-// `subnsub-monitor metrics` on the machine says what is wrong.
-// `subnsub-monitor metric set ID VALUE …` writes metrics.d/cli.json for
+// `subnsub-helper metrics` on the machine says what is wrong.
+// `subnsub-helper metric set ID VALUE …` writes metrics.d/cli.json for
 // anyone who would rather not write JSON at all.
 //
 // The wire (Tile / CustomSource) is a closed vocabulary the relay's clean.js
@@ -188,14 +188,14 @@ type Tile struct {
 	Stale bool     `json:"stale,omitempty"`
 	// exec-failed | exec-timeout | bad-output: the command behind the tile
 	// did not produce a value this round. What it printed stays on the
-	// machine (`subnsub-monitor metrics`).
+	// machine (`subnsub-helper metrics`).
 	Error   string       `json:"error,omitempty"`
 	History bool         `json:"history,omitempty"`
 	Fold    string       `json:"fold,omitempty"` // "min", or "" for max
 	Source  string       `json:"source"`
 	Tags    []ServiceTag `json:"tags,omitempty"`
 	// A quota (customquota.go): never on the wire as a tile — splitQuota
-	// turns it into a Provider — but printed by `subnsub-monitor metrics`.
+	// turns it into a Provider — but printed by `subnsub-helper metrics`.
 	Plan      string        `json:"plan,omitempty"`
 	Windows   []QuotaWindow `json:"windows,omitempty"`
 	Balance   string        `json:"balance,omitempty"`
@@ -1345,7 +1345,7 @@ func tilesOfRun(s *customSource, r *execRun, t float64) []Tile {
 }
 
 // collectCustom is what the snapshot carries. With the engine running it is
-// a read of the table; without one (a one-shot `subnsub-monitor`) it reads
+// a read of the table; without one (a one-shot `subnsub-helper`) it reads
 // the files and runs every command once.
 func collectCustom() ([]Tile, []CustomSource) {
 	custom.Lock()
@@ -1516,7 +1516,7 @@ func customRound(s *customSource) []Tile {
 
 // ── the terminal ───────────────────────────────────────────────────────────
 
-// `subnsub-monitor metrics [--json]`: read every file, say what is wrong,
+// `subnsub-helper metrics [--json]`: read every file, say what is wrong,
 // run each command once and print every tile — WITH what a failed command
 // printed, because this is the operator's own terminal.
 func runMetricsCLI(args []string) int {
@@ -1526,14 +1526,14 @@ func runMetricsCLI(args []string) int {
 		case "--json":
 			asJSON = true
 		default:
-			warnf("usage: subnsub-monitor metrics [--json]")
+			warnf("usage: subnsub-helper metrics [--json]")
 			return 2
 		}
 	}
 	paths := listCustomFiles()
 	live := pushedFromSocket()
 	if len(paths) == 0 && len(live) == 0 {
-		warnf("no custom tiles: write %s/<name>.json (see the helper README), or run `subnsub-monitor metric set ID VALUE`", customDir())
+		warnf("no custom tiles: write %s/<name>.json (see the helper README), or run `subnsub-helper metric set ID VALUE`", customDir())
 		return 2
 	}
 	code := 0
@@ -1639,17 +1639,17 @@ func tileValueText(t Tile) string {
 	return s
 }
 
-// `subnsub-monitor metric set|rm|ls`: the file metrics.d/cli.json, edited
+// `subnsub-helper metric set|rm|ls`: the file metrics.d/cli.json, edited
 // for people who would rather not write JSON. set upserts one tile by id
 // and stamps `at` now; fields not named keep what they had.
 func runMetricCLI(args []string) int {
 	usage := func() int {
-		warnf("usage: subnsub-monitor metric set ID VALUE [--name N] [--group G] [--type gauge|number|status|text]")
+		warnf("usage: subnsub-helper metric set ID VALUE [--name N] [--group G] [--type gauge|number|status|text]")
 		warnf("           [--unit U | --suffix S] [--min N] [--max N] [--warn N] [--bad N] [--no-alerts] [--invert]")
 		warnf("           [--icon I] [--tint T] [--label TEXT] [--ttl SEC] [--history|--no-history] [--fold max|min] [--tag k=v]...")
-		warnf("       subnsub-monitor metric rm ID")
-		warnf("       subnsub-monitor metric ls")
-		warnf("       subnsub-monitor metric push [JSON-LINE]...   (or lines on stdin) to the running helper's socket")
+		warnf("       subnsub-helper metric rm ID")
+		warnf("       subnsub-helper metric ls")
+		warnf("       subnsub-helper metric push [JSON-LINE]...   (or lines on stdin) to the running helper's socket")
 		return 2
 	}
 	if len(args) == 0 {

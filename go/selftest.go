@@ -99,7 +99,7 @@ func hardlinkProbe(r *os.Root, root string) {
 // elsewhere. Points at a throwaway temp dir, never anything sensitive — the
 // guard refuses based on the link, not on where it leads.
 func symlinkProbe(r *os.Root, root string) {
-	outside, err := os.MkdirTemp("", "subnsub-monitor-probe-")
+	outside, err := os.MkdirTemp("", "subnsub-helper-probe-")
 	if err != nil {
 		fmt.Println("  symlink probe skipped:", err)
 		return

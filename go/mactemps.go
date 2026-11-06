@@ -17,7 +17,7 @@ package main
 // WHY A CHILD PROCESS. Those are calls into somebody else's library through
 // pointers this program computed, and a mistake in one is a segfault that no
 // recover() sees. So the helper does not make them: it runs itself as
-// `subnsub-monitor temps`, which makes them, prints rows, and exits — and a
+// `subnsub-helper temps`, which makes them, prints rows, and exits — and a
 // child that crashes, hangs or prints nonsense costs the temperature tiles and
 // nothing else. The parent reads the output the way it reads vm_stat's.
 

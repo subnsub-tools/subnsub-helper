@@ -14,7 +14,7 @@ func installUnregisterFixture(t *testing.T, relay string) (string, string) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv(tokenEnv, "")
-	dir := filepath.Join(home, ".config", "subnsub-monitor")
+	dir := filepath.Join(home, ".config", "subnsub-helper")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestUnregisterDoesNotCreateMissingIdentity(t *testing.T) {
 	if err := unregisterMachine("https://relay.example", &http.Client{}); err == nil {
 		t.Fatal("expected missing installation error")
 	}
-	if _, err := os.Stat(filepath.Join(home, ".config", "subnsub-monitor", "agent-id")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".config", "subnsub-helper", "agent-id")); !os.IsNotExist(err) {
 		t.Fatalf("agent-id was created: %v", err)
 	}
 }

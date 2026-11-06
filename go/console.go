@@ -155,7 +155,7 @@ func consoleFile() string {
 
 // May this machine be asked to run commands?
 //
-// Read every time rather than cached, so `subnsub-monitor console off` takes
+// Read every time rather than cached, so `subnsub-helper console off` takes
 // effect on a helper that is already running — within one idle poll, without a
 // restart. Turning it OFF is the direction that has to be fast, and a cached
 // answer would make the fast direction the slow one.
@@ -211,9 +211,8 @@ func consoleSandboxNote(on bool) string {
 	if err != nil || home == "" {
 		return ""
 	}
-	unit := filepath.Join(home, ".config", "systemd", "user", "subnsub-monitor.service")
-	b, err := os.ReadFile(unit)
-	if err != nil {
+	unit, b := systemdUnit(home)
+	if unit == "" {
 		return "" // not a systemd install; launchd imposes none of this
 	}
 	strict := strings.Contains(string(b), "ProtectSystem=strict")
@@ -708,7 +707,7 @@ func consoleAsk(client *http.Client, pollURL, id, token string) (consolePoll, er
 		return out, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	resp, err := client.Do(req)
 	if err != nil {
 		return out, err
@@ -786,7 +785,7 @@ func consoleReport(client *http.Client, resultURL, id string, tok *tokenBox, r c
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tok.get())
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	resp, err := client.Do(req)
 	if err != nil {
 		warnf("console: could not report the result of a command that ran")

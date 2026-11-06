@@ -20,7 +20,7 @@ func probeHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".config", "subnsub-monitor")
+	dir := filepath.Join(home, ".config", "subnsub-helper")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

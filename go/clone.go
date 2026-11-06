@@ -626,7 +626,7 @@ func runClonesCLI(args []string) int {
 		return 0
 	}
 	if len(args) > 0 {
-		warnf("usage: subnsub-monitor clones [revoke <id>]")
+		warnf("usage: subnsub-helper clones [revoke <id>]")
 		return 2
 	}
 	t := loadTrust()

@@ -110,7 +110,7 @@ func serve(port int) {
 
 	// 127.0.0.1, never 0.0.0.0 — this must not be reachable from the network.
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	warnf("subnsub-monitor serving on http://%s  (/quota, /events)", addr)
+	warnf("subnsub-helper serving on http://%s  (/quota, /events)", addr)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -319,7 +319,7 @@ func connect(base, token string) {
 		// Bearer, not a query parameter: a token in the URL ends up in the
 		// relay's request logs and every proxy in between.
 		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("User-Agent", "subnsub-monitor")
+		req.Header.Set("User-Agent", "subnsub-helper")
 
 		wait := every
 		// A wait the relay dictated (Retry-After) counts from the response,

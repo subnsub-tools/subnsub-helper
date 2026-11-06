@@ -83,7 +83,7 @@ func kiroAnswers(urls []string, timeout time.Duration) bool {
 				got <- false
 				return
 			}
-			req.Header.Set("User-Agent", "subnsub-monitor")
+			req.Header.Set("User-Agent", "subnsub-helper")
 			resp, err := client.Do(req)
 			if err != nil {
 				got <- false

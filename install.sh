@@ -1,5 +1,5 @@
 #!/bin/sh
-# subnsub-monitor installer.
+# subnsub-helper installer.
 #
 #   curl -fsSL https://tools.subnsub.com/monitor/install.sh | sh -s -- <TOKEN>
 #
@@ -11,7 +11,7 @@
 #
 # The dashboard can also run commands on a machine, and that is OFF unless you
 # ask for it right here — add --console, or turn it on later with
-# `subnsub-monitor console on`. With it on, this machine runs what you type on
+# `subnsub-helper console on`. With it on, this machine runs what you type on
 # the dashboard, as this user, and writes every command to its own log first.
 # Those commands never pass through the relay: they come only through the
 # end-to-end encrypted tunnel (see DIRECT MODE below), and only from a browser
@@ -20,12 +20,12 @@
 #
 # And it can update the helper for you, so a new release does not mean logging
 # into every box. Also off by default: add --remote-update, or turn it on later
-# with `subnsub-monitor update on`. --console implies it — a console can
+# with `subnsub-helper update on`. --console implies it — a console can
 # already run this installer. Nothing is downloaded until you press the button,
 # and what gets installed comes from the release bucket and is checked against
 # its published checksum, so the dashboard chooses only WHEN.
 #
-# Or let the helper press it: add --auto-update (or `subnsub-monitor autoupdate
+# Or let the helper press it: add --auto-update (or `subnsub-helper autoupdate
 # on` later) and it looks at the bucket once an hour and installs a newer
 # release by itself. That switch counts only with remote updates on.
 #
@@ -44,7 +44,7 @@
 #
 # And it can keep them, so a machine that is asleep — or gone — still answers.
 # That one is off unless you ask: add --sessions-sync, or turn it on later with
-# `subnsub-monitor sessions sync on`. With it on, this machine parses its own
+# `subnsub-helper sessions sync on`. With it on, this machine parses its own
 # transcripts, redacts them, and pushes the message text to YOUR account's
 # archive over the same connection it already uses. It needs no console and
 # implies none; it is the one switch here that sends something out rather than
@@ -80,13 +80,13 @@
 # until one is named: there is no default. Played over the tailnet or the
 # tailcat tunnel only, never through the relay; the files stay here. Run the
 # line again on a machine that already has the helper to switch it on there;
-# --music=off stops sharing and keeps the list. 'subnsub-monitor music' shows what is
+# --music=off stops sharing and keeps the list. 'subnsub-helper music' shows what is
 # shared and changes it, and WebDAV folders the helper fetches are added from
 # the Monitor page by a pinned dashboard key, or here with 'music add-webdav'.
 #
 #   curl -fsSL .../install.sh | sh -s -- --direct --allow nodekey:… --music
 #
-# Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
+# Source: https://github.com/subnsub-tools/subnsub-helper (Apache-2.0)
 #
 # …and if you would rather look first, which is the reasonable instinct for
 # anything that installs a background process:
@@ -121,9 +121,19 @@ RELAY="${MON_RELAY:-https://monitor.subnsub.com}"
 # new name) ones it cannot forge. See go/signing.go.
 PUBKEY="${MON_PUBKEY:-}"
 BASE="${MON_BASE:-https://tools.subnsub.com/monitor}"   # where the binaries live
-NAME=subnsub-monitor
+# GitHub first: the public repository's release of this very version, whose
+# files anybody can check against the source. BASE above when GitHub cannot
+# be reached — the checksums below decide either way (user 2026-11-06).
+GITHUB_RELEASES=https://github.com/subnsub-tools/subnsub-helper/releases
+RELEASE=2026.11.06.3   # stamped by release.sh
+NAME=subnsub-helper
 BINDIR="${MON_BINDIR:-$HOME/.local/bin}"
-LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there too
+LABEL=com.subnsub.helper   # shows up in `launchctl list`; brand domain there too
+# The helper's name until 2026-11-06. A machine installed under it is moved
+# to the new names by the next install ("the old name" below) and removed under both
+# by --uninstall.
+OLD_NAME=subnsub-monitor
+OLD_LABEL=com.subnsub.monitor
 
 # Expected SHA-256 of each published binary, baked in.
 #
@@ -134,14 +144,14 @@ LABEL=com.subnsub.monitor   # shows up in `launchctl list`; brand domain there t
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=c4ea1ca91c39a96da27e88e04016f09f69fb86d462eac4ebf9b095c6c6a66d53
-SUM_linux_arm64=75693555a24d952dc5cca8b593f23aec6eead2bf3180cfdf79204e3168c9531c
-SUM_linux_arm=593c51201f52b7edb1ff869e7e913855ca13bbabc9b6d975dcb0e52485aa1720
-SUM_darwin_amd64=94d5bd22d8deb94d425e38c37bf5c1b9d152e9754c88a3f769d0364fa5e4319b
-SUM_darwin_arm64=f37efe12c6140ca4c2778b6cc2e86811415874781af2eea479c9d8276dcbcff6
-SUM_freebsd_amd64=c27c7ef12ce352f69d10df0b00f9a3bbcb308db48bd6b30120b2fb2eef2d24dc
-SUM_freebsd_arm64=9c4c01ee0b39b7b585d0e8a1b7b3c44044dbed19bddfc8312fa417fe9adcc578
-SUM_android_arm64=67f4bd8d856af31dc85dc50b1af9eb0070ecb126dc98751daf761c1da098e32d
+SUM_linux_amd64=e18f3db36f58703ffe2422825b322ed0107afd4e37e8afd70534e20b4e0bea06
+SUM_linux_arm64=1a0527f3f319f822d0d15d184bb10f82d4d3e9f5decde82f6117179d53cee9ce
+SUM_linux_arm=d1b65672dcd1007efba15d8f2f0b4d73d123147e7c6082f294abfcfbe3c43a12
+SUM_darwin_amd64=f826681f624e8e2358dab72fde192451cf120ec2d37c2add25619bc459917f3d
+SUM_darwin_arm64=72691f16ce1d0ab5724706aaf9e5ad0d7c26ad540ef34d8e32fa3b850942cd68
+SUM_freebsd_amd64=e672d417f2f97995d2dfc8818655ef187059833d6168ee92af938be999730262
+SUM_freebsd_arm64=f8502c67633621398ebb540470d36866bfd0d0aab04d4b53ce177b5d0d040e72
+SUM_android_arm64=c96b188f389b0bb440cfe6cf8e228bf4ef6aba0f76e4d34869f2634fea30ed48
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -223,12 +233,12 @@ helper_stop_strays() {
 # the loop may have been started by cron's @reboot rather than by this script,
 # and only the loop itself can know its own PID. See keeper_start.
 # OpenWrt: the helper arranges its own start at boot as a procd service that
-# runs the keeper loop (go/autostart.go; `subnsub-monitor autostart`).
+# runs the keeper loop (go/autostart.go; `subnsub-helper autostart`).
 # The marker is how a file is known to be that one and not somebody's own
 # init script under the same name.
 PROCD_INIT="/etc/init.d/$NAME"
 procd_is_ours() {
-    [ -f "$PROCD_INIT" ] && grep -q '^# subnsub-monitor-autostart ' "$PROCD_INIT" 2>/dev/null
+    [ -f "$PROCD_INIT" ] && grep -q "^# $NAME-autostart " "$PROCD_INIT" 2>/dev/null
 }
 
 keeper_stop() {
@@ -283,18 +293,10 @@ keeper_stop() {
     fi
 }
 
-# ---------------------------------------------------------------- uninstall
-uninstall() {
-    # Where the install actually put things, not where a default would guess.
-    # Without this, uninstalling after `MON_BINDIR=/opt/bin sh install.sh` would
-    # delete an unrelated ~/.local/bin/subnsub-monitor and leave the real one
-    # running.
-    manifest="$HOME/.config/$NAME/manifest"
-    if [ -f "$manifest" ]; then
-        # shellcheck disable=SC1090
-        . "$manifest"
-        [ -n "${INSTALLED_BIN:-}" ] && BINDIR=$(dirname "$INSTALLED_BIN")
-    fi
+# Every supervisor this install has, stopped and removed: the launchd agent,
+# the systemd unit, the keep-alive loop, a stray, the OpenWrt boot entry,
+# Termux:Boot's. Under $NAME and $LABEL as they are set when it is called.
+supervisors_down() {
     case "$(uname -s)" in
       Darwin)
         plist="$HOME/Library/LaunchAgents/${INSTALLED_LABEL:-$LABEL}.plist"
@@ -319,6 +321,38 @@ uninstall() {
         rm -f "$HOME/.termux/boot/$NAME"
         ;;
     esac
+}
+
+# ---------------------------------------------------------------- uninstall
+# Under both names: a machine installed before the rename and never since has
+# only the old one's, and one moved by an install may still have the link.
+uninstall() {
+    _old=""
+    if [ -d "$HOME/.config/$OLD_NAME" ] && [ ! -L "$HOME/.config/$OLD_NAME" ]; then
+        ( NAME=$OLD_NAME; LABEL=$OLD_LABEL; PROCD_INIT="/etc/init.d/$OLD_NAME"; uninstall_one )
+        _old=yes
+    fi
+    if [ -z "$_old" ] || [ -d "$HOME/.config/$NAME" ] || [ -e "$BINDIR/$NAME" ]; then
+        uninstall_one
+    fi
+    # The old directory's name a move left behind, once what it named is gone.
+    if [ -L "$HOME/.config/$OLD_NAME" ] && [ ! -e "$HOME/.config/$OLD_NAME" ]; then
+        rm -f "$HOME/.config/$OLD_NAME"
+    fi
+    exit 0
+}
+uninstall_one() {
+    # Where the install actually put things, not where a default would guess.
+    # Without this, uninstalling after `MON_BINDIR=/opt/bin sh install.sh` would
+    # delete an unrelated ~/.local/bin/subnsub-helper and leave the real one
+    # running.
+    manifest="$HOME/.config/$NAME/manifest"
+    if [ -f "$manifest" ]; then
+        # shellcheck disable=SC1090
+        . "$manifest"
+        [ -n "${INSTALLED_BIN:-}" ] && BINDIR=$(dirname "$INSTALLED_BIN")
+    fi
+    supervisors_down
     # The daemon and every supervisor are down before this one-shot request, so
     # no late push can recreate the card after the relay archives it. Keep the
     # binary and credentials until it has been attempted. Older binaries do not
@@ -360,13 +394,20 @@ uninstall() {
           "$HOME/.config/$NAME/tailcat.psk" "$HOME/.config/$NAME/tailcat.psk.new" \
           "$HOME/.config/$NAME/clones" "$HOME/.config/$NAME/clones.new" \
           "$HOME/.config/$NAME/clone-access" "$HOME/.config/$NAME/clone-access.new" \
-          "$HOME/.config/$NAME/pairing" "$HOME/.config/$NAME/pairing.new"
+          "$HOME/.config/$NAME/pairing" "$HOME/.config/$NAME/pairing.new" \
+          "$HOME/.config/$NAME/update-github-down"
     # The binary the last self-update moved aside. Left behind it would be an
     # unreferenced few megabytes under a name nothing else will ever clean up.
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}.prev"
+    # The links between the two names: the old name left pointing at the new
+    # binary by an install that moved the machine over, and the new name the
+    # helper put beside an old binary (go/name.go). Links only.
+    _bd=$(dirname "${INSTALLED_BIN:-$BINDIR/$NAME}")
+    for _n in subnsub-helper "$OLD_NAME"; do
+        [ -L "$_bd/$_n" ] && rm -f "$_bd/$_n"
+    done
     rmdir "$HOME/.config/$NAME" 2>/dev/null || true
     say "removed $NAME"
-    exit 0
 }
 [ "${1:-}" = "--uninstall" ] && uninstall
 
@@ -473,12 +514,59 @@ done
 # check below as a pasted one: it is about to be written into a unit file
 # and a plist, and "it was on disk" is not a reason to skip that.
 conf="$HOME/.config/$NAME"
-if [ -z "$TOKEN" ] && [ -f "$conf/token" ]; then
-    TOKEN=$(sed -n 's/^SUBNSUB_MONITOR_TOKEN=//p' "$conf/token" | head -n 1)
+# A machine installed under the old name: read from its directory until
+# "the old name" step, which moves it here once the new binary has been verified, and
+# put the binary where that install put its own unless told otherwise.
+LEGACY=""
+if [ ! -d "$conf" ] && [ -d "$HOME/.config/$OLD_NAME" ] && [ ! -L "$HOME/.config/$OLD_NAME" ]; then
+    LEGACY="$HOME/.config/$OLD_NAME"
+    _ob=$(sed -n 's/^INSTALLED_BIN=//p' "$LEGACY/manifest" 2>/dev/null | head -n 1)
+    [ -n "$_ob" ] || _ob="$BINDIR/$OLD_NAME"
+    [ -n "${MON_BINDIR:-}" ] || BINDIR=$(dirname "$_ob")
+    # The move stops the old helper's service, and with it every process in
+    # that service: run from the helper's own console or terminal, this script
+    # would be stopped half way, leaving the machine with no helper running.
+    # Its own cgroup says so on systemd; anywhere, an ancestor that is the old
+    # binary does.
+    _under=""
+    if [ -r /proc/self/cgroup ] && grep -q "/$OLD_NAME\.service" /proc/self/cgroup 2>/dev/null; then
+        _under=yes
+    fi
+    _p=$$
+    _i=0
+    while [ -z "$_under" ] && [ "$_i" -lt 40 ]; do
+        case "$_p" in ''|*[!0-9]*|0|1) break ;; esac
+        if [ -r "/proc/$_p/status" ]; then
+            _c=$(tr '\0' '\n' < "/proc/$_p/cmdline" 2>/dev/null | sed -n 1p || true)
+            _p=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$_p/status" 2>/dev/null || true)
+        else
+            _c=$(ps -o comm= -p "$_p" 2>/dev/null || true)
+            _p=$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ' || true)
+        fi
+        [ "${_c##*/}" = "$OLD_NAME" ] && _under=yes
+        _i=$((_i + 1))
+    done
+    [ -z "$_under" ] || die "this machine's helper is still installed as $OLD_NAME, and moving it to $NAME stops the service this shell is running in. Run this line in a terminal on the machine (or over ssh), not in the dashboard's console"
+    # Where nothing below can stop it (FreeBSD's daemon(8), a helper started
+    # by hand), the old helper has to be stopped first: its directory is about
+    # to move out from under it.
+    case "$(uname -s)" in
+      Linux|Darwin) ;;
+      *)
+        _run=$(ps axwwo args= 2>/dev/null | while read -r _a; do
+            case "$_a" in "$_ob connect"|"$_ob connect "*) echo yes ;; esac
+        done)
+        [ -z "$_run" ] || die "$_ob is running. Stop it first (and whatever starts it, such as a daemon(8) line or an rc.d script), then run this again"
+        ;;
+    esac
+fi
+readconf="${LEGACY:-$conf}"
+if [ -z "$TOKEN" ] && [ -f "$readconf/token" ]; then
+    TOKEN=$(sed -n 's/^SUBNSUB_MONITOR_TOKEN=//p' "$readconf/token" | head -n 1)
 fi
 DIRECT_ON=no
 [ "$DIRECT_ARG" = on ] && DIRECT_ON=yes
-[ -f "$conf/direct" ] && [ "$DIRECT_ARG" != off ] && DIRECT_ON=yes
+[ -f "$readconf/direct" ] && [ "$DIRECT_ARG" != off ] && DIRECT_ON=yes
 # A machine needs a road to be watched on: a token (the relay) or the tunnel.
 # Neither is an install that reports to nobody, and it says so here rather
 # than starting a service that exits with "no token" in a log nobody reads.
@@ -564,9 +652,9 @@ fi
 # MON_SECOND=1) is the deliberate way past it, for the person who really
 # wants two accounts watching one machine.
 #
-# Both shapes the machine can be in are matched — the helper itself
-# (`…/subnsub-monitor connect …`) and its keep-alive loop
-# (`sh …/.config/subnsub-monitor/keeper.sh`), since the loop may be between
+# Both shapes the machine can be in are matched, under either name — the
+# helper itself (`…/subnsub-helper connect …`) and its keep-alive loop
+# (`sh …/.config/subnsub-helper/keeper.sh`), since the loop may be between
 # restarts of the helper at the moment this runs. The loop is only a loop
 # when a SHELL is running the file: `less` or an editor on keeper.sh is
 # somebody reading it. On Linux the processes are read from /proc, argv by
@@ -582,9 +670,9 @@ helper_seen() {
     # $1 uid, $2 argv0, $3 argv1: prints "user<TAB>path" for a helper or its loop.
     _path=""
     case "${2##*/}" in
-      "$NAME") [ "${3:-}" = connect ] && _path=$2 ;;
+      "$NAME"|"$OLD_NAME") [ "${3:-}" = connect ] && _path=$2 ;;
       sh|dash|bash|ash|ksh|zsh)
-        case "${3:-}" in */.config/"$NAME"/keeper.sh) _path=$3 ;; esac ;;
+        case "${3:-}" in */.config/"$NAME"/keeper.sh|*/.config/"$OLD_NAME"/keeper.sh) _path=$3 ;; esac ;;
     esac
     [ -n "$_path" ] || return 0
     # busybox's id takes no uid argument; the passwd file says the same.
@@ -612,7 +700,7 @@ other_helpers() {
         # `read -r _uid _rest` keeps the whole command line in _rest, spaces
         # and all; the two shapes are recognised by their suffixes. A path
         # with a space is still one path here, only split by nothing. The
-        # helper's line has to START with its path: `sudo -u x …/subnsub-monitor
+        # helper's line has to START with its path: `sudo -u x …/subnsub-helper
         # connect` is the wrapper, not the helper, and would name the wrong
         # user (its child is caught on its own line).
         ps axwwo uid=,args= 2>/dev/null | while read -r _uid _rest; do
@@ -620,9 +708,9 @@ other_helpers() {
             _seen=1
             [ "$_uid" = "$_me" ] && continue
             case "$_rest" in
-              /*/"$NAME"\ connect|/*/"$NAME"\ connect\ *)
+              /*/"$NAME"\ connect|/*/"$NAME"\ connect\ *|/*/"$OLD_NAME"\ connect|/*/"$OLD_NAME"\ connect\ *)
                 helper_seen "$_uid" "${_rest%% connect*}" connect ;;
-              */.config/"$NAME"/keeper.sh)
+              */.config/"$NAME"/keeper.sh|*/.config/"$OLD_NAME"/keeper.sh)
                 _i0=${_rest%% *}
                 helper_seen "$_uid" "$_i0" "${_rest#* }" ;;
             esac
@@ -639,7 +727,7 @@ if [ "$SECOND_ARG" != on ]; then
         printf '%s\n' "$others" | while IFS="$(printf '\t')" read -r _who _what; do
             printf '         %s  (%s)\n' "$_who" "$_what" >&2
         done
-        die "run this installer as that user (an update needs no reinstall: the dashboard's Update button, or 'subnsub-monitor update'), or add --second to knowingly install a second helper here"
+        die "run this installer as that user (an update needs no reinstall: the dashboard's Update button, or 'subnsub-helper update'), or add --second to knowingly install a second helper here"
     fi
 fi
 
@@ -784,13 +872,44 @@ if [ -n "${MON_LOCAL:-}" ]; then
     say "installing from $MON_LOCAL"
     cp "$MON_LOCAL" "$tmp"
 else
-    say "downloading $asset"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$BASE/$asset" -o "$tmp" || die "download failed: $BASE/$asset"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$tmp" "$BASE/$asset" || die "download failed: $BASE/$asset"
-    else
-        die "need curl or wget"
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "need curl or wget"
+    # GitHub's release of this version first, given up on when it cannot be
+    # reached or stalls — a connection that does not open in 15 seconds, or
+    # less than 1 KB/s for 30 — and then the same file from BASE. Either way
+    # the checksum below is this script's own, so where the bytes came from
+    # does not change what is accepted; a file that fails it is refused, not
+    # fetched again from the other place. Not tried with MON_BASE set (a test
+    # host) or from an unstamped copy of this script.
+    fetched=""
+    if [ -z "${MON_BASE:-}" ]; then
+        case "$RELEASE" in
+          PLACEHOLDER_*) ;;
+          *)
+            say "downloading $asset $RELEASE from GitHub"
+            _gh="$GITHUB_RELEASES/download/v$RELEASE/$asset"
+            _rc=0
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$_gh" -o "$tmp" 2>/dev/null || _rc=$?
+            else
+                wget -q -T 30 -O "$tmp" "$_gh" 2>/dev/null || _rc=$?
+            fi
+            if [ "$_rc" = 0 ] && [ -s "$tmp" ]; then
+                fetched=yes
+            elif [ "$_rc" = 22 ]; then
+                say "GitHub has no $asset for $RELEASE yet; downloading from ${BASE#https://} instead"
+            else
+                say "GitHub could not be reached; downloading from ${BASE#https://} instead"
+            fi
+            ;;
+        esac
+    fi
+    if [ -z "$fetched" ]; then
+        say "downloading $asset"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$BASE/$asset" -o "$tmp" || die "download failed: $BASE/$asset"
+        else
+            wget -qO "$tmp" "$BASE/$asset" || die "download failed: $BASE/$asset"
+        fi
     fi
 fi
 
@@ -828,6 +947,37 @@ if ! "$tmp" token >/dev/null 2>&1; then
     die "the downloaded binary does not run on this machine"
 fi
 
+# ------------------------------------------------------------- the old name
+# A machine installed as subnsub-monitor (before 2026-11-06) moves to the new
+# names here, once the new binary is known to run: everything that supervised
+# the old one stopped and removed (its unit, agent, keeper loop and @reboot
+# line, procd entry, Termux:Boot file), its directory moved as it is to the
+# new one — token, agent id and keys with it, so the dashboard card stays the
+# same — and the old binary removed. The old names are left as links to the
+# new binary and the new directory, so a command typed or scripted under them
+# keeps working.
+legacy_link=""
+if [ -n "$LEGACY" ]; then
+    say "moving this install from $OLD_NAME to $NAME"
+    _oldbin=$_ob
+    (
+        NAME=$OLD_NAME; LABEL=$OLD_LABEL; PROCD_INIT="/etc/init.d/$OLD_NAME"
+        INSTALLED_BIN=$_oldbin
+        INSTALLED_LABEL=$(sed -n 's/^INSTALLED_LABEL=//p' "$LEGACY/manifest" 2>/dev/null | head -n 1)
+        supervisors_down
+    ) || true
+    rm -rf "$LEGACY/keeper.lock"
+    rm -f "$LEGACY/manifest" "$LEGACY/keeper.sh" "$LEGACY/keeper.sh.new"
+    mv "$LEGACY" "$conf" || die "could not move $LEGACY to $conf"
+    # The old directory's name, left pointing at the new one: a metrics.d tile,
+    # a script or a cron line of the user's may name a file in it.
+    ln -s "$NAME" "$LEGACY" 2>/dev/null || true
+    rm -f "$_oldbin" "$_oldbin.prev"
+    # The new name's link the helper may have put beside the old binary.
+    [ -L "$(dirname "$_oldbin")/$NAME" ] && rm -f "$(dirname "$_oldbin")/$NAME"
+    legacy_link="$BINDIR/$OLD_NAME"
+fi
+
 # Land it in the target directory first so the final step is a rename within
 # one filesystem — atomic, and it cannot leave a half-written binary behind.
 staged="$BINDIR/.$NAME.new.$$"
@@ -838,6 +988,9 @@ mv -f "$staged" "$BINDIR/$NAME"
 rm -f "$tmp"
 trap - EXIT INT TERM
 say "installed $BINDIR/$NAME"
+if [ -n "$legacy_link" ] && [ ! -e "$legacy_link" ]; then
+    ln -s "$NAME" "$legacy_link" 2>/dev/null || true
+fi
 
 # ----------------------------------------------------------------- token file
 # Kept out of the service definition and out of the process arguments, so it
@@ -974,7 +1127,7 @@ esac
 case "$AUTO_ARG" in
   on)  : > "$conf/autoupdate"; chmod 0600 "$conf/autoupdate"
        if [ "$UPDATE_ARG" != on ] && [ "$CONSOLE_ARG" != on ] && [ ! -f "$conf/update" ] && [ ! -f "$conf/console" ]; then
-           echo "note: --auto-update counts only with remote updates on; add --remote-update, or run 'subnsub-monitor update on'" >&2
+           echo "note: --auto-update counts only with remote updates on; add --remote-update, or run 'subnsub-helper update on'" >&2
        fi ;;
   off) rm -f "$conf/autoupdate" ;;
 esac
@@ -1148,7 +1301,7 @@ keeper_start() {
     fi
     {
         printf '#!%s\n' "$ksh"
-        printf '# Generated by the subnsub-monitor installer on a machine with no service\n'
+        printf '# Generated by the subnsub-helper installer on a machine with no service\n'
         printf '# manager to start the helper. Do not edit: reinstalling overwrites it.\n'
         printf 'KEEPER=%s\n' "$(shquote "$keeper")"
         printf 'CONF=%s\n'   "$(shquote "$conf")"
@@ -1338,7 +1491,7 @@ case "$goos" in
         rm -f "$bootdir/$NAME.new"
         {
             printf '#!%s\n' "$PREFIX/bin/sh"
-            printf '# Generated by the subnsub-monitor installer; Termux:Boot runs it at boot.\n'
+            printf '# Generated by the subnsub-helper installer; Termux:Boot runs it at boot.\n'
             printf '# Do not edit: reinstalling overwrites it.\n'
             printf 'termux-wake-lock 2>/dev/null || true\n'
             printf 'nohup %s >>%s 2>&1 </dev/null &\n' \
@@ -1398,7 +1551,7 @@ case "$goos" in
 # service's cgroup, so the filesystem confinement below is deliberately the
 # ordinary one for a user service. NoNewPrivileges still holds — nothing here
 # can gain privileges this user does not already have — and turning the console
-# off (subnsub-monitor console off, then reinstall) puts the strict sandbox back.
+# off (subnsub-helper console off, then reinstall) puts the strict sandbox back.
 NoNewPrivileges=true
 ProtectKernelTunables=true
 RestrictSUIDSGID=true"
@@ -1440,7 +1593,7 @@ RestrictSUIDSGID=true"
     fi
     cat > "$unitdir/$NAME.service" <<EOF
 [Unit]
-Description=subnsub-monitor — pushes AI coding quota to $RELAY
+Description=subnsub-helper — pushes AI coding quota to $RELAY
 After=network-online.target
 
 [Service]

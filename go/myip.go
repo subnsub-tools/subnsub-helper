@@ -392,7 +392,7 @@ func myipGet(parent context.Context, client *http.Client, u string, timeout time
 	if err != nil {
 		return myipProbe{E: myipErrUnreachable}
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor/"+helperVersion)
+	req.Header.Set("User-Agent", "subnsub-helper/"+helperVersion)
 	if fam >= 0 {
 		req.Header.Set("Accept", "application/json")
 	}

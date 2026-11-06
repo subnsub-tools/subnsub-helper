@@ -4,7 +4,7 @@
 # allowances that are past their limit or closest to it (helper README,
 # "A quota of your own"; cloudflare.json beside this file runs it).
 #
-#   cp cloudflare-bill.sh cloudflare.json ~/.config/subnsub-monitor/metrics.d/
+#   cp cloudflare-bill.sh cloudflare.json ~/.config/subnsub-helper/metrics.d/
 #
 # Needs curl and jq, and an API token with two read-only permissions,
 # Account Analytics: Read and Billing: Read, for one account
@@ -13,8 +13,8 @@
 # read; it never leaves the machine, and neither the relay nor the dashboard
 # sees anything but the figures below.
 #
-#   install -m 600 /dev/null ~/.config/subnsub-monitor/cloudflare.env
-#   cat >> ~/.config/subnsub-monitor/cloudflare.env <<'EOF'
+#   install -m 600 /dev/null ~/.config/subnsub-helper/cloudflare.env
+#   cat >> ~/.config/subnsub-helper/cloudflare.env <<'EOF'
 #   CF_API_TOKEN=…
 #   CF_ACCOUNT_ID=…
 #   CF_BUDGET=10     # US dollars a billing period: the bill row's total
@@ -36,7 +36,7 @@
 # the end of the period at the same pace. The invoice is the authority.
 set -u
 
-conf=${CF_ENV_FILE:-$HOME/.config/subnsub-monitor/cloudflare.env}
+conf=${CF_ENV_FILE:-$HOME/.config/subnsub-helper/cloudflare.env}
 # The file holds the settings; one already in the environment wins, so a
 # setting can be tried from a shell without editing it.
 _tok=${CF_API_TOKEN-} _acct=${CF_ACCOUNT_ID-} _budget=${CF_BUDGET-} _rows=${CF_ROWS-}

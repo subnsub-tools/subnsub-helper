@@ -50,7 +50,7 @@ import (
 
 const (
 	// One key per line, base64 (standard alphabet), written by the installer
-	// and by `subnsub-monitor trust`.
+	// and by `subnsub-helper trust`.
 	trustedKeysFile = "trusted-keys"
 	// How far a command's own timestamp may be from this machine's clock. Wide
 	// enough for ordinary skew between a laptop and a server nobody runs NTP

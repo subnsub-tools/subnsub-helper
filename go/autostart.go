@@ -11,10 +11,10 @@ package main
 // Why HERE and not only in install.sh: auto-update replaces this binary and
 // nothing else. A fix in the installer reaches machines installed after it;
 // a fix in the binary reaches the routers already out there on their next
-// hourly update. install.sh calls the same code (`subnsub-monitor autostart`),
+// hourly update. install.sh calls the same code (`subnsub-helper autostart`),
 // so there is one init script and one author of it.
 //
-// WHAT IT WRITES: /etc/init.d/subnsub-monitor, a procd service whose whole job
+// WHAT IT WRITES: /etc/init.d/subnsub-helper, a procd service whose whole job
 // is to run the keeper loop the installer already generated — the loop knows
 // the relay, reads service.env for the token, and restarts the helper when it
 // dies. Then `enable`, which is a symlink in /etc/rc.d. It is NOT started:
@@ -25,7 +25,7 @@ package main
 // So it is as narrow as it can be: OpenWrt only, root only, only where the
 // installer's keeper exists, never over a file this did not write, and
 // MON_AUTOSTART=off (or a file named autostart-off in the config directory)
-// stops it. `subnsub-monitor autostart` says what it did and why.
+// stops it. `subnsub-helper autostart` says what it did and why.
 
 import (
 	"bytes"
@@ -42,11 +42,23 @@ import (
 const (
 	autostartEnvVar  = "MON_AUTOSTART"
 	autostartOffFile = "autostart-off"
-	autostartName    = "subnsub-monitor"
-	// The line that says a file is ours to rewrite — and, absent, that it is
-	// somebody's own init script and not to be touched.
-	autostartMarker = "# subnsub-monitor-autostart v1 — written by the helper (autostart.go); MON_AUTOSTART=off stops it"
 )
+
+// The service's name: the install's (name.go), so a router installed before
+// the rename keeps its /etc/init.d/subnsub-monitor rather than gaining a
+// second service beside it.
+func autostartName() string { return installName() }
+
+// The line that says a file is ours to rewrite — and, absent, that it is
+// somebody's own init script and not to be touched. A script written under
+// either name is ours.
+func autostartMarker() string {
+	return "# " + autostartName() + "-autostart v1 — written by the helper (autostart.go); MON_AUTOSTART=off stops it"
+}
+
+func autostartOurs(b []byte) bool {
+	return bytes.Contains(b, []byte("# "+helperName+"-autostart ")) || bytes.Contains(b, []byte("# "+legacyName+"-autostart "))
+}
 
 // Seams for the test: the root the /etc paths hang from, who we are, and the
 // two commands this runs.
@@ -87,7 +99,7 @@ func shSingle(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`)
 func autostartScript(home, keeper string) []byte {
 	var b bytes.Buffer
 	b.WriteString("#!/bin/sh /etc/rc.common\n")
-	b.WriteString(autostartMarker + "\n")
+	b.WriteString(autostartMarker() + "\n")
 	b.WriteString("# Starts the keep-alive loop install.sh generated; the loop starts the helper.\n")
 	b.WriteString("START=99\nSTOP=10\nUSE_PROCD=1\n\n")
 	fmt.Fprintf(&b, "KEEPER=%s\nHELPER_HOME=%s\n\n", shSingle(keeper), shSingle(home))
@@ -170,7 +182,7 @@ func ensureAutostart() (changed bool, note string) {
 	if why := autostartUntrusted(keeper, home); why != "" {
 		return false, "not registering " + keeper + " to run as root at boot: " + why
 	}
-	script := filepath.Join(etc, "init.d", autostartName)
+	script := filepath.Join(etc, "init.d", autostartName())
 	want := autostartScript(home, keeper)
 	if st, err := os.Lstat(script); err == nil && !st.Mode().IsRegular() {
 		return false, script + " exists and is not a plain file: left alone"
@@ -185,7 +197,7 @@ func ensureAutostart() (changed bool, note string) {
 		if autostartEnabled(script) {
 			return false, "already arranged: " + script
 		}
-	case err == nil && !bytes.Contains(have, []byte("# subnsub-monitor-autostart ")):
+	case err == nil && !autostartOurs(have):
 		return false, script + " exists and is not this helper's: left alone"
 	case err != nil && !os.IsNotExist(err):
 		return false, "cannot read " + script
@@ -194,7 +206,7 @@ func ensureAutostart() (changed bool, note string) {
 	// its mode through the descriptor — never a fixed ".new" a symlink could
 	// be waiting under, and never shared with a second caller (the daemon and
 	// `autostart` typed at the same moment).
-	f, err := os.CreateTemp(filepath.Dir(script), "."+autostartName+".*")
+	f, err := os.CreateTemp(filepath.Dir(script), "."+autostartName()+".*")
 	if err != nil {
 		return false, "cannot write " + script + ": " + err.Error()
 	}

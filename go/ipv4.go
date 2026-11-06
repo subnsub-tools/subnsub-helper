@@ -178,7 +178,7 @@ func ipv4Lookup(src string) (addr, cc string) {
 	if err != nil {
 		return "", ""
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor/"+helperVersion)
+	req.Header.Set("User-Agent", "subnsub-helper/"+helperVersion)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", ""

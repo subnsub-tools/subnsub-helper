@@ -259,7 +259,7 @@ func spaceProbe(base, token, name string) (*Space, int) {
 		return nil, 0
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 
 	started := time.Now()
 	resp, err := client.Do(req)

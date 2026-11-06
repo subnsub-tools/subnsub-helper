@@ -15,15 +15,15 @@ func TestInstalledPathSurvivesTheSwapThatHidesIt(t *testing.T) {
 	if got := installedAt(); got != "" {
 		t.Fatalf("nothing installed yet, want %q, got %q", "", got)
 	}
-	noteInstalledAt("/home/box/.local/bin/subnsub-monitor")
-	if got, want := installedAt(), "/home/box/.local/bin/subnsub-monitor"; got != want {
+	noteInstalledAt("/home/box/.local/bin/subnsub-helper")
+	if got, want := installedAt(), "/home/box/.local/bin/subnsub-helper"; got != want {
 		t.Fatalf("want %q, got %q", want, got)
 	}
 	// A second update in the same process — the tunnel path can deliver one
 	// while the mailbox path is still winding down — must not leave the first
 	// answer standing.
-	noteInstalledAt("/opt/bin/subnsub-monitor")
-	if got, want := installedAt(), "/opt/bin/subnsub-monitor"; got != want {
+	noteInstalledAt("/opt/bin/subnsub-helper")
+	if got, want := installedAt(), "/opt/bin/subnsub-helper"; got != want {
 		t.Fatalf("want %q, got %q", want, got)
 	}
 }

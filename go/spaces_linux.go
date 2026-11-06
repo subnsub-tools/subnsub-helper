@@ -35,7 +35,7 @@ var sysSetns = map[string]uintptr{"amd64": 308, "arm64": 268, "arm": 375, "386":
 func spacesAvailable() bool { return sysSetns != 0 }
 
 // spacesFound lists the named namespaces that are not the one this process is
-// already in — `ip netns exec X subnsub-monitor` must not report X as a
+// already in — `ip netns exec X subnsub-helper` must not report X as a
 // second exit.
 // The namespace this process was started in, read once at start-up.
 var spacesOwn = func() (st syscall.Stat_t) {

@@ -205,7 +205,7 @@ func fetchBytes(ctx context.Context, c *http.Client, url string, max int64) ([]b
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, errors.New("the bucket could not be reached")

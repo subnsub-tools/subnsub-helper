@@ -1,6 +1,6 @@
 package main
 
-// Where a session ran — `subnsub-monitor sessions where --id ID` — so the
+// Where a session ran — `subnsub-helper sessions where --id ID` — so the
 // dashboard can open a terminal on this machine, stand in that directory and
 // hand the conversation back to the agent that had it.
 //
@@ -81,7 +81,7 @@ func runSessionsWhereCLI(rest []string) int {
 		case strings.HasPrefix(a, "--id="):
 			id = a[len("--id="):]
 		default:
-			warnf("usage: subnsub-monitor sessions where --id ID [--json]")
+			warnf("usage: subnsub-helper sessions where --id ID [--json]")
 			return 2
 		}
 	}

@@ -7,7 +7,7 @@ package main
 // file rewritten every second, a disk kept awake for a dashboard. So beside
 // the directory there is a socket the same user can write to:
 //
-//	~/.config/subnsub-monitor/metrics.sock
+//	~/.config/subnsub-helper/metrics.sock
 //
 // One JSON value per line — a tile, or an array of tiles, with exactly the
 // fields a file's tile takes (custom.go) — and one line back per line sent:
@@ -387,7 +387,7 @@ func pushedTiles(t float64, taken map[string]bool) ([]Tile, *float64) {
 	return out, newest
 }
 
-// `subnsub-monitor metric push [LINE…]`: send lines to the running helper's
+// `subnsub-helper metric push [LINE…]`: send lines to the running helper's
 // socket without needing nc or socat — each argument is a line, or stdin is
 // read when there are none — and print what came back.
 func runMetricPush(args []string) int {

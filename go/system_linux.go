@@ -808,7 +808,7 @@ func linuxProcs(s *System) {
 // design — see TempC in system.go.
 func linuxTemp(s *System) { fillTemps(s, tempsRefreshSec, localTemps) }
 
-// What `subnsub-monitor temps` prints, and what the collector reads.
+// What `subnsub-helper temps` prints, and what the collector reads.
 func localTemps() []Temp { return scanTemps("/sys/class/hwmon", "/sys/class/thermal") }
 
 func linuxLoad(s *System) {

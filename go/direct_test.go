@@ -22,7 +22,7 @@ import (
 )
 
 // Point the config directory at a scratch HOME so nothing here touches the
-// developer's real ~/.config/subnsub-monitor.
+// developer's real ~/.config/subnsub-helper.
 func scratchHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -46,7 +46,7 @@ func TestDirectSwitchIsAFile(t *testing.T) {
 	if !directEnabled() {
 		t.Fatal("direct is off after setDirect(true)")
 	}
-	fi, err := os.Stat(filepath.Join(home, ".config", "subnsub-monitor", directFileName))
+	fi, err := os.Stat(filepath.Join(home, ".config", "subnsub-helper", directFileName))
 	if err != nil || fi.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("switch file: %v %v", err, fi)
 	}
@@ -107,7 +107,7 @@ func TestAllowlistAppendsAndStrikes(t *testing.T) {
 	if len(got) != 2 || got[0] != k1 || got[1] != k2 {
 		t.Fatalf("allowlist is %v", got)
 	}
-	path := filepath.Join(home, ".config", "subnsub-monitor", allowedClientsFile)
+	path := filepath.Join(home, ".config", "subnsub-helper", allowedClientsFile)
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("allowlist is %v, want owner-only", fi.Mode().Perm())
@@ -143,7 +143,7 @@ func TestDerpMapURLRequiresHTTPS(t *testing.T) {
 	if derpMapURL() != "" {
 		t.Fatal("a fresh install has a DERP map override")
 	}
-	conf := filepath.Join(home, ".config", "subnsub-monitor")
+	conf := filepath.Join(home, ".config", "subnsub-helper")
 	os.MkdirAll(conf, 0o700)
 	os.WriteFile(filepath.Join(conf, derpMapFileName), []byte("http://derp.example/derpmap.json\n"), 0o600)
 	if derpMapURL() != "" {

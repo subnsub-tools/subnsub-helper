@@ -263,7 +263,7 @@ func TestCleanID(t *testing.T) {
 func TestSetLabelRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	conf := filepath.Join(dir, ".config", "subnsub-monitor")
+	conf := filepath.Join(dir, ".config", "subnsub-helper")
 
 	if err := setLabel("  tokyo  "); err != nil {
 		t.Fatal(err)

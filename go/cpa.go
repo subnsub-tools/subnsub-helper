@@ -495,7 +495,7 @@ func cpaRequest(cfg cpaConfig, method, path string, body []byte) (int, []byte, e
 		return 0, nil, errors.New("bad request")
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.key)
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

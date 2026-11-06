@@ -174,7 +174,7 @@ func provRequestTimeout(method, url string, header map[string]string, body []byt
 	if err != nil {
 		return 0, nil, errors.New("bad request")
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}

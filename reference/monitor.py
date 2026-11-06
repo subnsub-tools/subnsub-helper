@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""subnsub-monitor — AI coding quota for machines you can't reach.
+"""subnsub-helper — AI coding quota for machines you can't reach.
 
    Two providers, and they get their numbers in fundamentally different ways.
 
@@ -532,7 +532,7 @@ def collect_claude(timeout=8.0):
         req = urllib.request.Request(CLAUDE_USAGE_URL, headers={
             'Authorization': 'Bearer ' + token,
             'Content-Type': 'application/json',
-            'User-Agent': 'subnsub-monitor/poc',
+            'User-Agent': 'subnsub-helper/poc',
         })
         # Default urlopen follows redirects and Python's redirect handler keeps
         # the Authorization header while doing it — a redirect from the usage
@@ -783,7 +783,7 @@ def _serve(port):
     # 127.0.0.1, never 0.0.0.0 — this must not be reachable from the network.
     srv = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     srv.daemon_threads = True
-    print('subnsub-monitor serving on http://127.0.0.1:%d  (/quota, /events)' % port,
+    print('subnsub-helper serving on http://127.0.0.1:%d  (/quota, /events)' % port,
           file=sys.stderr)
     srv.serve_forever()
 
@@ -820,7 +820,7 @@ def _connect(base, token, every=30.0):
                      # Bearer, not a query parameter: a token in the URL ends
                      # up in the relay's request logs and every proxy between.
                      'Authorization': 'Bearer ' + token,
-                     'User-Agent': 'subnsub-monitor/poc'})
+                     'User-Agent': 'subnsub-helper/poc'})
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 resp.read()
@@ -893,7 +893,7 @@ def _symlink_probe():
     import tempfile
     outside = link = None
     try:
-        outside = tempfile.mkdtemp(prefix='subnsub-monitor-probe-')
+        outside = tempfile.mkdtemp(prefix='subnsub-helper-probe-')
         (Path(outside) / 'rollout-outside.jsonl').write_text('{}\n')
         link = Path(SESSIONS_ROOT) / ('probe-dir-%d' % os.getpid())
         os.symlink(outside, link)

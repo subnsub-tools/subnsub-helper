@@ -683,7 +683,7 @@ func requireOwnerOnly(dir string) error {
 }
 
 // PublicKeyOf reads the persisted node key's public half without starting
-// anything — for `subnsub-monitor address` and the installer, which need
+// anything — for `subnsub-helper address` and the installer, which need
 // the identity before (or without) a running tunnel. It creates the key if
 // there is none, under the same rules as the running carrier.
 func PublicKeyOf(stateDir string) (key.NodePublic, error) {

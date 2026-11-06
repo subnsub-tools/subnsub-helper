@@ -90,7 +90,7 @@ func speedNetReq(ctx context.Context, method, path string, body io.Reader) (*htt
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor/"+helperVersion)
+	req.Header.Set("User-Agent", "subnsub-helper/"+helperVersion)
 	return req, nil
 }
 

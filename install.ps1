@@ -1,5 +1,5 @@
 <#
-subnsub-monitor installer for Windows.
+subnsub-helper installer for Windows.
 
 ⚠ WINDOWS BINARIES ARE NOT CURRENTLY PUBLISHED, AND THIS SCRIPT WILL NOT INSTALL ANYTHING.
 
@@ -23,17 +23,17 @@ dashboard, told apart by a random id it creates on first run. To name one, add
 
 The dashboard can also run commands on a machine, and that is OFF unless you ask
 for it right here — add -Console, or turn it on later with
-`subnsub-monitor console on`. With it on, this machine runs what you type on the
+`subnsub-helper console on`. With it on, this machine runs what you type on the
 dashboard, as this user, and writes every command to its own log first.
 
 And it can update the helper for you, so a new release does not mean logging
 into every box. Also off by default: add -RemoteUpdate, or turn it on later with
-`subnsub-monitor update on`. -Console implies it — a console can already run this
+`subnsub-helper update on`. -Console implies it — a console can already run this
 installer. Nothing is downloaded until you press the button: there is no timer,
 and what gets installed comes from the release bucket and is checked against its
 published checksum, so the dashboard chooses only WHEN.
 
-Source: https://github.com/subnsub-tools/subnsub-monitor (Apache-2.0)
+Source: https://github.com/subnsub-tools/subnsub-helper (Apache-2.0)
 
 …and if you would rather look first, which is the reasonable instinct for
 anything that installs a background process:
@@ -79,15 +79,15 @@ $ProgressPreference = 'SilentlyContinue'
 
 $Relay    = if ($env:MON_RELAY) { $env:MON_RELAY } else { 'https://monitor.subnsub.com' }
 $Base     = if ($env:MON_BASE)  { $env:MON_BASE }  else { 'https://tools.subnsub.com/monitor' }
-$AppName  = 'subnsub-monitor'
-$TaskName = 'subnsub-monitor'
+$AppName  = 'subnsub-helper'
+$TaskName = 'subnsub-helper'
 $BinDir   = if ($env:MON_BINDIR) { $env:MON_BINDIR } else { Join-Path $HOME '.local\bin' }
 # The same directory the helper itself reads, and the same one the Unix
-# installer writes: ~/.config/subnsub-monitor. Not %APPDATA%, which is where a
+# installer writes: ~/.config/subnsub-helper. Not %APPDATA%, which is where a
 # Windows program would ordinarily put this — one path for all platforms is what
 # lets a single -Uninstall, and a single reader in the helper, be correct
 # everywhere. The helper looks here and nowhere else.
-$ConfDir  = Join-Path $HOME '.config\subnsub-monitor'
+$ConfDir  = Join-Path $HOME '.config\subnsub-helper'
 
 # Expected SHA-256 of each published binary, baked in.
 #
@@ -495,7 +495,7 @@ foreach ($logon in @('S4U', 'Interactive')) {
         $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType $logon -RunLevel Limited
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers `
             -Settings $settings -Principal $principal -Force `
-            -Description "subnsub-monitor - pushes AI coding quota to $Relay" | Out-Null
+            -Description "subnsub-helper - pushes AI coding quota to $Relay" | Out-Null
         $registered = $true
         $whenever = ($logon -eq 'S4U')
         break

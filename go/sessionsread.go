@@ -1,8 +1,8 @@
 package main
 
 // Reading THIS machine's coding-agent sessions, one page at a time, when the
-// dashboard asks over the console channel — `subnsub-monitor sessions recent`
-// and `subnsub-monitor sessions open`.
+// dashboard asks over the console channel — `subnsub-helper sessions recent`
+// and `subnsub-helper sessions open`.
 //
 // sessions.go finds places; this file goes to them. A search hit is a snippet
 // with a session id and a line number, and the two verbs here are the rest of
@@ -164,7 +164,7 @@ func runSessionsRecentCLI(rest []string) int {
 			}
 			limit = n
 		default:
-			warnf("usage: subnsub-monitor sessions recent [--limit N] [--project NAME] [--since WHEN] [--until WHEN] [--json]")
+			warnf("usage: subnsub-helper sessions recent [--limit N] [--project NAME] [--since WHEN] [--until WHEN] [--json]")
 			return 2
 		}
 	}
@@ -271,7 +271,7 @@ func runSessionsOpenCLI(rest []string) int {
 				return 2
 			}
 		default:
-			warnf("usage: subnsub-monitor sessions open --id ID [--around N | --before N | --after N] [--json]")
+			warnf("usage: subnsub-helper sessions open --id ID [--around N | --before N | --after N] [--json]")
 			return 2
 		}
 	}

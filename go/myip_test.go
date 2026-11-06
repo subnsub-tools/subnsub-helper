@@ -211,7 +211,7 @@ func myipSite(t *testing.T, addr string, conns *atomic.Int32, rdapStatus int) *h
 	t.Helper()
 	mux := http.NewServeMux()
 	ua := func(r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("User-Agent"), "subnsub-monitor/") {
+		if !strings.HasPrefix(r.Header.Get("User-Agent"), "subnsub-helper/") {
 			t.Errorf("%s asked without the helper's User-Agent: %q", r.URL.Path, r.Header.Get("User-Agent"))
 		}
 	}

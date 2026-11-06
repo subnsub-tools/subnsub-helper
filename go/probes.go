@@ -8,7 +8,7 @@ package main
 // The Service / ServiceSource wire shapes carry no
 // URL, host, port or credential, and a prober that knows all of those is the
 // place that promise is easiest to break. So the configuration lives in
-// ~/.config/subnsub-monitor/probes.json, owner-only, read by this process and
+// ~/.config/subnsub-helper/probes.json, owner-only, read by this process and
 // nobody else, and the reading carries the operator's LABEL for a probe, its
 // kind, its state and its numbers — never its target. The relay applies the
 // same allowlist again, and the page has no
@@ -50,7 +50,7 @@ package main
 //
 // The file is re-read whenever it changes on disk; a broken file keeps the
 // last good set running and flags the source as bad-config, and
-// `subnsub-monitor probes` on the machine says what is wrong. Results are
+// `subnsub-helper probes` on the machine says what is wrong. Results are
 // summarised into hourly buckets for two days and daily buckets for a year
 // in probes-state.json beside the config, which is what the 24 h / 30 d /
 // 365 d uptime figures are computed from — nothing finer is kept, and nothing
@@ -501,7 +501,7 @@ func probeHTTP(ctx context.Context, p probeSpec) probeResult {
 		res.err = err.Error()
 		return res
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor/"+helperVersion)
+	req.Header.Set("User-Agent", "subnsub-helper/"+helperVersion)
 	req.Header.Set("Accept", "*/*")
 	r, err := client.Do(req)
 	if err != nil {
@@ -654,7 +654,7 @@ var probes struct {
 
 // startProbes begins the background scheduler. Idempotent, like
 // startSysSampler, and called from the same places: the long-running modes.
-// A one-shot collection (`subnsub-monitor` with no verb) never calls this
+// A one-shot collection (`subnsub-helper` with no verb) never calls this
 // and runs one round synchronously instead — see collectProbes.
 func startProbes() {
 	probes.Lock()
@@ -925,7 +925,7 @@ func serviceOf(r *probeRun, t float64) Service {
 }
 
 // collectProbes is what the snapshot carries. With the scheduler running it
-// is a read of the table; without one (a one-shot `subnsub-monitor`) it runs
+// is a read of the table; without one (a one-shot `subnsub-helper`) it runs
 // every probe once, in parallel, and reports that — so the JSON a person
 // prints at the terminal shows their services too, without the daemon.
 func collectProbes() ([]Service, []ServiceSource) {
@@ -999,7 +999,7 @@ func probeRound(cfg probeConfig) []*probeRun {
 
 // ── the terminal ───────────────────────────────────────────────────────────
 
-// `subnsub-monitor probes`: read the file, say what is wrong with it, run one
+// `subnsub-helper probes`: read the file, say what is wrong with it, run one
 // round and print each probe's verdict — WITH the reason, because this is
 // the operator's own terminal on the operator's own machine, the one place
 // the target and the error may appear.
@@ -1010,7 +1010,7 @@ func runProbesCLI(args []string) int {
 		case "--json":
 			asJSON = true
 		default:
-			warnf("usage: subnsub-monitor probes [--json]")
+			warnf("usage: subnsub-helper probes [--json]")
 			return 2
 		}
 	}

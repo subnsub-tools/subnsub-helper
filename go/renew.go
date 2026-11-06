@@ -668,7 +668,7 @@ func requestRenewal(site, tok string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{

@@ -1,36 +1,17 @@
-subnsub-monitor
-Copyright 2026 SUB&SUB LLC
+subnsub-helper — third-party notices
+=====================================
 
-This product includes software developed at SUB&SUB LLC. The helper is
-Apache-2.0 (https://github.com/subnsub-tools/subnsub-monitor).
+The Monitor helper binaries (helper/go) and the browser module for
+Monitor's direct connection (helper/tailcat-web) link the following
+open-source software. The helper itself is Apache-2.0
+(https://github.com/subnsub-tools/subnsub-helper).
 
---------------------------------------------------------------------------------
-Attribution
---------------------------------------------------------------------------------
-
-The idea this program implements — reading the quota an AI coding tool has
-left on the machine you are sitting at, and putting it somewhere you can see
-it — comes from CodexBar by Peter Steinberger:
-
-    https://github.com/steipete/CodexBar
-    MIT License, Copyright (c) Peter Steinberger
-
-CodexBar is a macOS menu-bar application. subnsub-monitor is an independent
-implementation in a different shape: a headless agent that dials out, so a
-browser can watch a machine it has no route to. No CodexBar source code is
-used or included here.
-
-Credit follows the idea, not the source tree. CodexBar got there first.
-
---------------------------------------------------------------------------------
-Third-party notices
---------------------------------------------------------------------------------
-
-The helper binaries (go/) link the following open-source software. The full
-dependency graph is recorded in go/go.sum; the components below are the ones
-whose licences ask for this notice in binary distributions. WireGuard is a
+The full dependency graph is recorded in helper/go/go.sum and
+helper/tailcat-web/go.sum; the components below are the ones whose
+licences ask for this notice in binary distributions. WireGuard is a
 registered trademark of Jason A. Donenfeld.
 
+------------------------------------------------------------------------
 Tailcat — https://github.com/tailscale/tailcat
 Pinned at commit 4d50a34f315d (2026-08-31)
 Copyright (c) Tailscale Inc & contributors
@@ -70,6 +51,7 @@ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
+------------------------------------------------------------------------
 wireguard-go — https://git.zx2c4.com/wireguard-go
 Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
 SPDX-License-Identifier: MIT
@@ -78,9 +60,13 @@ gVisor netstack — https://github.com/google/gvisor
 Copyright 2018 The gVisor Authors
 SPDX-License-Identifier: Apache-2.0 (and MIT for the netstack tree)
 
+Go toolchain support file wasm_exec.js (shipped as tailcat-web-exec.js)
+Copyright 2018 The Go Authors. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause
+
 ------------------------------------------------------------------------
 Stats — https://github.com/exelban/stats
-The table of Apple Silicon SMC temperature keys in go/mactemps.go
+The table of Apple Silicon SMC temperature keys in helper/go/mactemps.go
 (appleSMCKeys) is taken from Stats' Modules/Sensors/values.swift.
 Copyright (c) 2019 Serhiy Mytrovtsiy
 SPDX-License-Identifier: MIT

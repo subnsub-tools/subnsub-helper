@@ -546,7 +546,7 @@ func codexAskRateLimits(bin string) (*codexLiveResult, error) {
 	if err := send(map[string]any{
 		"id": 1, "method": "initialize",
 		"params": map[string]any{
-			"clientInfo": map[string]any{"name": "subnsub-monitor", "version": helperVersion},
+			"clientInfo": map[string]any{"name": "subnsub-helper", "version": helperVersion},
 		},
 	}); err != nil {
 		return nil, err

@@ -39,8 +39,8 @@ func TestEnsureAutostart(t *testing.T) {
 	autostartIsRoot = func() bool { return isRoot }
 	autostartEnable = func(string) error { enables++; enabled = true; return nil }
 	autostartEnabled = func(string) bool { return enabled }
-	script := filepath.Join(root, "etc/init.d", autostartName)
-	keeper := filepath.Join(home, ".config/subnsub-monitor/keeper.sh")
+	script := filepath.Join(root, "etc/init.d", autostartName())
+	keeper := filepath.Join(home, ".config/subnsub-helper/keeper.sh")
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -121,7 +121,7 @@ func TestEnsureAutostart(t *testing.T) {
 	if st.Mode().Perm() != 0o755 {
 		t.Errorf("mode %v", st.Mode())
 	}
-	for _, want := range []string{"#!/bin/sh /etc/rc.common\n", autostartMarker, "USE_PROCD=1", "START=99",
+	for _, want := range []string{"#!/bin/sh /etc/rc.common\n", autostartMarker(), "USE_PROCD=1", "START=99",
 		"KEEPER='" + keeper + "'", "HELPER_HOME='" + home + "'", `procd_set_param command "$KEEPER"`,
 		`procd_set_param env HOME="$HELPER_HOME"`, "procd_set_param respawn 3600 60 0"} {
 		if !strings.Contains(string(b), want) {
@@ -148,7 +148,7 @@ func TestEnsureAutostart(t *testing.T) {
 		t.Errorf("a foreign script was overwritten: %s", note)
 	}
 	// An older version of OURS is brought up to date.
-	must(os.WriteFile(script, []byte("#!/bin/sh /etc/rc.common\n# subnsub-monitor-autostart v0\n"), 0o755))
+	must(os.WriteFile(script, []byte("#!/bin/sh /etc/rc.common\n# subnsub-helper-autostart v0\n"), 0o755))
 	if changed, _ := ensureAutostart(); !changed {
 		t.Error("our own older script should be rewritten")
 	}
@@ -161,7 +161,7 @@ func TestEnsureAutostart(t *testing.T) {
 
 // A home directory with a quote in it lands in a script root runs at boot.
 func TestAutostartScriptQuoting(t *testing.T) {
-	b := autostartScript(`/root/it's $(reboot)`, `/root/it's $(reboot)/.config/subnsub-monitor/keeper.sh`)
+	b := autostartScript(`/root/it's $(reboot)`, `/root/it's $(reboot)/.config/subnsub-helper/keeper.sh`)
 	if !strings.Contains(string(b), `HELPER_HOME='/root/it'\''s $(reboot)'`) {
 		t.Fatalf("quoting:\n%s", b)
 	}

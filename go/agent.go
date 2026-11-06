@@ -61,7 +61,9 @@ func configDir() string {
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".config", "subnsub-monitor")
+	// Either name's (name.go): a machine installed before the rename keeps
+	// ~/.config/subnsub-monitor until it is installed again.
+	return configDirIn(home)
 }
 
 // This machine's stable handle, created on first use.

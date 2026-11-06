@@ -22,44 +22,44 @@ import (
 // platform rather than on two of them.
 var stderr io.Writer = os.Stderr
 
-const usage = `subnsub-monitor — AI coding quota for machines you can't reach
+const usage = `subnsub-helper — AI coding quota for machines you can't reach
 
-  subnsub-monitor                        one snapshot as JSON, exit
-  subnsub-monitor watch [SEC]            reprint every SEC seconds
-  subnsub-monitor serve [PORT]           serve /quota + /events on 127.0.0.1
-  subnsub-monitor connect URL [TOKEN]    dial out and push to the relay
-  subnsub-monitor unregister URL         archive this installed machine at the relay
-  subnsub-monitor name [LABEL]           show or set this machine's dashboard name
-  subnsub-monitor console [on|off]       show or set whether the dashboard may run commands here
-  subnsub-monitor update [on|off]        show or set whether the dashboard may replace this helper
-  subnsub-monitor autoupdate [on|off]    show or set whether this helper replaces itself, hourly, unasked
-  subnsub-monitor diagnostics            report whether program names are read here (always, where /proc allows)
-  subnsub-monitor autostart              OpenWrt: arrange (or report) starting at boot
-  subnsub-monitor spaces [RELAY]         probe the other network namespaces' exits once and print
-  subnsub-monitor netns                  say how many network namespaces this machine shows and which one this helper runs in
-  subnsub-monitor roads                  measure every way out against the release host once and print
-  subnsub-monitor probes [--json]        check the services in probes.json once and print each verdict
-  subnsub-monitor metrics [--json]       read metrics.d/, run each command once and print every tile
-  subnsub-monitor temps                  print this machine's temperature sensors as JSON
-  subnsub-monitor metric set ID VALUE    put your own number on this machine's card (metric rm / ls too)
-  subnsub-monitor sessions search TEXT   search this machine's coding-agent sessions
-  subnsub-monitor sessions recent        list the newest coding-agent sessions here
-  subnsub-monitor sessions open --id ID  print one session's messages, a page at a time
-  subnsub-monitor sessions sync [on|off] show or set whether sessions go to the account archive
-  subnsub-monitor trust [KEY]            list, or add, a dashboard key allowed to command this machine
-  subnsub-monitor untrust KEY            stop accepting commands signed by that key
-  subnsub-monitor direct [on|off]        show or set whether a browser may reach this machine directly
-  subnsub-monitor allow [KEY]            list, or add, a browser key allowed through the direct tunnel
-  subnsub-monitor disallow KEY           stop serving that browser key
-  subnsub-monitor address                print this machine's direct address and node key
-  subnsub-monitor music [on|off|add|...] show or set the music this machine shares with the browsers
+  subnsub-helper                        one snapshot as JSON, exit
+  subnsub-helper watch [SEC]            reprint every SEC seconds
+  subnsub-helper serve [PORT]           serve /quota + /events on 127.0.0.1
+  subnsub-helper connect URL [TOKEN]    dial out and push to the relay
+  subnsub-helper unregister URL         archive this installed machine at the relay
+  subnsub-helper name [LABEL]           show or set this machine's dashboard name
+  subnsub-helper console [on|off]       show or set whether the dashboard may run commands here
+  subnsub-helper update [on|off]        show or set whether the dashboard may replace this helper
+  subnsub-helper autoupdate [on|off]    show or set whether this helper replaces itself, hourly, unasked
+  subnsub-helper diagnostics            report whether program names are read here (always, where /proc allows)
+  subnsub-helper autostart              OpenWrt: arrange (or report) starting at boot
+  subnsub-helper spaces [RELAY]         probe the other network namespaces' exits once and print
+  subnsub-helper netns                  say how many network namespaces this machine shows and which one this helper runs in
+  subnsub-helper roads                  measure every way out against the release host once and print
+  subnsub-helper probes [--json]        check the services in probes.json once and print each verdict
+  subnsub-helper metrics [--json]       read metrics.d/, run each command once and print every tile
+  subnsub-helper temps                  print this machine's temperature sensors as JSON
+  subnsub-helper metric set ID VALUE    put your own number on this machine's card (metric rm / ls too)
+  subnsub-helper sessions search TEXT   search this machine's coding-agent sessions
+  subnsub-helper sessions recent        list the newest coding-agent sessions here
+  subnsub-helper sessions open --id ID  print one session's messages, a page at a time
+  subnsub-helper sessions sync [on|off] show or set whether sessions go to the account archive
+  subnsub-helper trust [KEY]            list, or add, a dashboard key allowed to command this machine
+  subnsub-helper untrust KEY            stop accepting commands signed by that key
+  subnsub-helper direct [on|off]        show or set whether a browser may reach this machine directly
+  subnsub-helper allow [KEY]            list, or add, a browser key allowed through the direct tunnel
+  subnsub-helper disallow KEY           stop serving that browser key
+  subnsub-helper address                print this machine's direct address and node key
+  subnsub-helper music [on|off|add|...] show or set the music this machine shares with the browsers
                                          on its direct allowlist (tailnet and tailcat only)
-  subnsub-monitor clone [use|forget]     show, save, or delete a portable terminal access copy
-  subnsub-monitor run MACHINE -- CMD     run a command on a machine using a portable copy
-  subnsub-monitor shell MACHINE          open an interactive terminal on a machine using a portable copy
-  subnsub-monitor clones [revoke ID]     list or revoke portable copies admitted on this machine
-  subnsub-monitor version                print this build's version and exit
-  subnsub-monitor selftest               show what the collectors can and cannot open
+  subnsub-helper clone [use|forget]     show, save, or delete a portable terminal access copy
+  subnsub-helper run MACHINE -- CMD     run a command on a machine using a portable copy
+  subnsub-helper shell MACHINE          open an interactive terminal on a machine using a portable copy
+  subnsub-helper clones [revoke ID]     list or revoke portable copies admitted on this machine
+  subnsub-helper version                print this build's version and exit
+  subnsub-helper selftest               show what the collectors can and cannot open
 
 serve only ever shows you THIS machine. connect is the real shape:
 outbound-only, so a browser anywhere can watch a box it has no route to.
@@ -206,7 +206,7 @@ func main() {
 
 	case "unregister":
 		if len(args) != 2 {
-			warnf("usage: subnsub-monitor unregister URL")
+			warnf("usage: subnsub-helper unregister URL")
 			os.Exit(2)
 		}
 		if err := unregisterMachine(args[1], nil); err != nil {
@@ -219,6 +219,9 @@ func main() {
 		// A router with no service manager learns to start this at boot
 		// (autostart.go). Every daemon start, so an auto-update carries it.
 		startAutostart()
+		// A machine installed under the old name answers to the new one
+		// too (name.go).
+		bridgeLegacyName()
 		if len(args) < 2 {
 			fmt.Print(usage)
 			os.Exit(2)
@@ -623,16 +626,16 @@ func main() {
 				os.Exit(runSessionsSyncCLI(args[2:]))
 			}
 		}
-		warnf("usage: subnsub-monitor sessions search [--limit N] [--json] [--project NAME] [--since WHEN] [--until WHEN] [--] TEXT...")
-		warnf("       subnsub-monitor sessions recent [--limit N] [--json] [--project NAME] [--since WHEN] [--until WHEN]")
+		warnf("usage: subnsub-helper sessions search [--limit N] [--json] [--project NAME] [--since WHEN] [--until WHEN] [--] TEXT...")
+		warnf("       subnsub-helper sessions recent [--limit N] [--json] [--project NAME] [--since WHEN] [--until WHEN]")
 		warnf("       (WHEN is 7d, 24h, 30m, 4w, 2026-08-01 or a full RFC3339 stamp; both bound the session's LAST activity)")
 		warnf("       search also takes --term TEXT (a phrase, spaces and all), --not TEXT (must NOT appear),")
 		warnf("       --re PATTERN and --not-re PATTERN; all repeatable, all case-insensitive")
 		warnf("       and --role user|assistant|tool, which narrows to who said it (search only —")
 		warnf("       every session holds a user message, so a LISTING narrowed by role is not narrowed)")
-		warnf("       subnsub-monitor sessions open --id ID [--around N | --before N | --after N] [--json]")
-		warnf("       subnsub-monitor sessions where --id ID [--json]   (the directory it ran in, to resume it there)")
-		warnf("       subnsub-monitor sessions sync [on|off] [--dry-run] [--json]")
+		warnf("       subnsub-helper sessions open --id ID [--around N | --before N | --after N] [--json]")
+		warnf("       subnsub-helper sessions where --id ID [--json]   (the directory it ran in, to resume it there)")
+		warnf("       subnsub-helper sessions sync [on|off] [--dry-run] [--json]")
 		warnf("(reads the coding-agent sessions on this machine; the dashboard's fleet search runs the same verbs)")
 		os.Exit(2)
 

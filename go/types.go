@@ -1,4 +1,4 @@
-// Package main — subnsub-monitor, the shipping helper.
+// Package main — subnsub-helper, the shipping helper.
 //
 // Ported from the Python reference implementation, which stays as the
 // reference: the Python
@@ -291,7 +291,7 @@ type Snapshot struct {
 	ServiceSources []ServiceSource `json:"service_sources,omitempty"`
 
 	// The operator's own numbers (custom.go): tiles written to
-	// ~/.config/subnsub-monitor/metrics.d/ by whatever they like, and the
+	// ~/.config/subnsub-helper/metrics.d/ by whatever they like, and the
 	// state of each file they came from. Same shape discipline as Services:
 	// a closed vocabulary the relay's clean.js rebuilds field by field.
 	Custom        []Tile         `json:"custom,omitempty"`

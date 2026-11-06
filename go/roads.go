@@ -47,7 +47,7 @@ const (
 	roadsSampleBudget = 12 * time.Second
 	// The sample asset: the one target every release publishes. Which
 	// platform's bytes come back does not matter; their speed does.
-	roadsSampleAsset = "subnsub-monitor-linux-amd64"
+	roadsSampleAsset = "subnsub-helper-linux-amd64"
 	roadsEnvVar      = "MON_ROADS"
 	roadDialTimeout  = 5 * time.Second
 	// A download that moves nothing for this long is on a dead or crawling
@@ -278,7 +278,7 @@ func roadMeasure(base, name string) *Road {
 	if err != nil {
 		return nil
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	req.Header.Set("Range", "bytes=0-"+itoa(roadsSampleBytes-1))
 	out := &Road{Name: name, CheckedAt: now()}
 	started := time.Now()

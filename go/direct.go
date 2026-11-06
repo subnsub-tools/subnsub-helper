@@ -11,13 +11,13 @@ package main
 //
 // THE SWITCH IS A FILE, EXACTLY LIKE THE CONSOLE'S. `direct` exists in the
 // config directory or it does not; nothing reads its contents. It is written
-// by the installer when asked (--direct) or by `subnsub-monitor direct on`,
+// by the installer when asked (--direct) or by `subnsub-helper direct on`,
 // at the machine, by somebody who already has a shell here. The relay cannot
 // flip it and neither can the page.
 //
 // WHO MAY WATCH IS A SECOND FILE, `allowed-clients`, one tailcat node public
 // key per line — the same shape as trusted-keys, for the same reason: the
-// list is appended by the installer (--allow) or `subnsub-monitor allow`, and
+// list is appended by the installer (--allow) or `subnsub-helper allow`, and
 // a key struck from it stops being served on its next request. With the list
 // empty the tunnel does not start at all. An open tunnel is a lab, not a
 // product.
@@ -56,7 +56,7 @@ const (
 	directFileName = "direct"
 	// One tailcat node public key per line: the browsers allowed in.
 	allowedClientsFile = "allowed-clients"
-	// Where the running tunnel writes its address for `subnsub-monitor
+	// Where the running tunnel writes its address for `subnsub-helper
 	// address` and the installer's closing message. 0600, like the token —
 	// the address is a bearer capability for reaching this node.
 	addressFileName = "address"
@@ -434,7 +434,7 @@ func runDirect(ctx context.Context) {
 	for ctx.Err() == nil {
 		if len(loadAllowedClients()) == 0 {
 			if !waited {
-				warnf("direct: no browser is allowed yet — run:  subnsub-monitor allow <nodekey:...>")
+				warnf("direct: no browser is allowed yet — run:  subnsub-helper allow <nodekey:...>")
 				warnf("direct: (the key is shown on the Monitor page; the tunnel starts when one is added)")
 				waited = true
 			}
@@ -1243,7 +1243,7 @@ func runDirectCLI(args []string) int {
 		fmt.Printf("on   (%s)\n", agentID())
 		if n := len(loadAllowedClients()); n == 0 {
 			fmt.Println("no browser is allowed yet, so the tunnel is not running —")
-			fmt.Println("  subnsub-monitor allow <nodekey:...>   (the key is on the Monitor page)")
+			fmt.Println("  subnsub-helper allow <nodekey:...>   (the key is on the Monitor page)")
 		} else {
 			fmt.Printf("%d browser key(s) allowed\n", n)
 		}
@@ -1251,7 +1251,7 @@ func runDirectCLI(args []string) int {
 		fmt.Printf("off  (%s)\n", agentID())
 	}
 	if len(args) > 0 {
-		fmt.Println("takes effect when the helper restarts (systemctl --user restart subnsub-monitor,")
+		fmt.Println("takes effect when the helper restarts (systemctl --user restart subnsub-helper,")
 		fmt.Println("or re-run the installer)")
 	}
 	return 0
@@ -1276,7 +1276,7 @@ func runAllowCLI(args []string) int {
 	}
 	fmt.Printf("allowed (%s)\n", agentID())
 	if !directEnabled() {
-		fmt.Println("note: direct mode is off; 'subnsub-monitor direct on' and a restart turn the tunnel on")
+		fmt.Println("note: direct mode is off; 'subnsub-helper direct on' and a restart turn the tunnel on")
 	}
 	return 0
 }
@@ -1313,7 +1313,7 @@ func runAddressCLI() int {
 	} else if directEnabled() {
 		fmt.Println("(no address yet — the tunnel publishes one once it is up)")
 	} else {
-		fmt.Println("(direct mode is off — 'subnsub-monitor direct on')")
+		fmt.Println("(direct mode is off — 'subnsub-helper direct on')")
 	}
 	fmt.Printf("node key: %s\n", pub.String())
 	if s := pairingStatusLine(conf, time.Now()); s != "" {

@@ -32,10 +32,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,9 +50,23 @@ import (
 )
 
 const (
-	// Where releases live. A constant, never a value taken from the relay or
+	// Where releases live. Constants, never a value taken from the relay or
 	// from the command — see the note above about who decides what.
-	updateBase = "https://tools.subnsub.com/monitor"
+	//
+	// The public repository's releases first: the binaries and SHA256SUMS
+	// published there are the ones anybody can check against the source, so
+	// a release changed on this site alone is not installed by a machine that
+	// can reach GitHub (user 2026-11-06). This site second, for a machine that
+	// cannot: asked at once when somebody presses Update, and by the hourly
+	// look only once GitHub has been out of reach for updateGitHubGrace. A
+	// GitHub that answers — with a checksum that does not match, or without
+	// the version yet — is never a reason to ask this site instead.
+	updateGitHub = "https://github.com/subnsub-tools/subnsub-helper/releases"
+	updateBase   = "https://tools.subnsub.com/monitor"
+	// Since when GitHub has been out of reach, in the install's directory.
+	updateGitHubDownFile = "update-github-down"
+	updateGitHubGrace    = 6 * time.Hour
+	updateGitHubHeaders  = time.Minute
 	// Overridable from this machine's own environment, for testing against a
 	// local copy. Same precedence rule as every other switch here: the
 	// environment belongs to whoever started the process, which is someone who
@@ -406,8 +422,8 @@ func updateSandboxNote(on bool) string {
 	if err != nil || home == "" {
 		return ""
 	}
-	b, err := os.ReadFile(filepath.Join(home, ".config", "systemd", "user", "subnsub-monitor.service"))
-	if err != nil {
+	path, b := systemdUnit(home)
+	if path == "" {
 		return ""
 	}
 	unit := string(b)
@@ -525,7 +541,7 @@ func copyFile(src, dst string) error {
 // The extension this platform needs on an executable.
 //
 // Windows will not run a file without one, and neither will Go's own exec
-// resolution — a staged binary named `.subnsub-monitor-1234` downloads,
+// resolution — a staged binary named `.subnsub-helper-1234` downloads,
 // verifies, and then cannot be probed, which would fail the update at the last
 // check before the swap for a reason that has nothing to do with the release.
 // The published asset carries the same suffix for the same reason: the file a
@@ -584,7 +600,7 @@ func fetchText(ctx context.Context, c *http.Client, url string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "subnsub-monitor")
+	req.Header.Set("User-Agent", "subnsub-helper")
 	resp, err := c.Do(req)
 	if err != nil {
 		return "", err
@@ -604,7 +620,7 @@ func fetchText(ctx context.Context, c *http.Client, url string) (string, error) 
 // The checksum SHA256SUMS gives for one file, or "".
 //
 // Matched on the exact name. A prefix match would accept the line for
-// subnsub-monitor-linux-arm64 when asked about subnsub-monitor-linux-arm, and
+// subnsub-helper-linux-arm64 when asked about subnsub-helper-linux-arm, and
 // the two differ by one character in a field that decides which bytes are
 // acceptable.
 func sumFor(manifest, name string) string {
@@ -650,11 +666,155 @@ func runUpdate(id string) (consoleResult, bool) {
 	if real, err := filepath.EvalSymlinks(self); err == nil && real != "" {
 		self = real
 	}
-	base := updateBase
+	// A copy somebody pointed this machine at is asked alone.
 	if v := strings.TrimSpace(os.Getenv(updateBaseEnv)); v != "" {
-		base = strings.TrimRight(v, "/")
+		return updateFrom(id, self, strings.TrimRight(v, "/"))
 	}
-	return updateFrom(id, self, base)
+	// A press asks this site the moment GitHub cannot be reached: somebody
+	// is waiting on it. The hourly look waits out the grace first.
+	return updateFromSrcs(id, self, []updateSrc{githubSrc(updateGitHub), siteSrc(updateBase)},
+		func() bool { return id != "auto" || githubDownLong() })
+}
+
+// updateSrc is a place a release is published: where its version, its
+// manifest and its files are.
+type updateSrc struct {
+	label    string
+	version  string
+	manifest func(ver string) string
+	file     func(ver, name string) string
+	// GitHub's answers redirect to its download host (githubRedirect).
+	github bool
+}
+
+func siteSrc(base string) updateSrc {
+	label := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+	if i := strings.IndexByte(label, '/'); i > 0 {
+		label = label[:i]
+	}
+	return updateSrc{label: label, version: base + "/VERSION",
+		manifest: func(string) string { return base + "/SHA256SUMS" },
+		file:     func(_, name string) string { return base + "/" + name }}
+}
+
+// githubSrc: releases tagged v<version>, each carrying VERSION, SHA256SUMS
+// and the binaries (helper/go/release-github.sh).
+func githubSrc(releases string) updateSrc {
+	return updateSrc{label: "GitHub", version: releases + "/latest/download/VERSION",
+		manifest: func(ver string) string { return releases + "/download/v" + ver + "/SHA256SUMS" },
+		file:     func(ver, name string) string { return releases + "/download/v" + ver + "/" + name },
+		github:   true}
+}
+
+// client is a road's client for this source.
+//
+// GitHub's also gives up on an answer that does not begin within
+// updateGitHubHeaders: a host that takes the connection and then says
+// nothing would otherwise hold a download (whose client has no overall
+// timeout; the stall watch starts with the body) until the whole budget
+// is gone, and leave none for the site.
+func (s updateSrc) client(road string, timeout time.Duration) *http.Client {
+	c := roadClient(road, timeout)
+	if s.github {
+		cc := *c
+		cc.CheckRedirect = githubRedirect
+		if t, ok := cc.Transport.(*http.Transport); ok {
+			t = t.Clone()
+			t.ResponseHeaderTimeout = updateGitHubHeaders
+			cc.Transport = t
+		}
+		return &cc
+	}
+	return c
+}
+
+// GitHub answers a release file with a redirect to where it is stored; one
+// that goes anywhere else is not followed. A variable, so a test's server can
+// stand in for GitHub.
+var updateGitHubHostOK = func(u *url.URL) bool {
+	if u.Scheme != "https" {
+		return false
+	}
+	switch u.Hostname() {
+	case "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com":
+		return true
+	}
+	return false
+}
+
+// errOffGitHub: a redirect refused. An answer, not a host out of reach, so
+// it never sends the update on to the site (updateAway).
+var errOffGitHub = errors.New("redirect refused")
+
+func githubRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return fmt.Errorf("%w: too many", errOffGitHub)
+	}
+	if !updateGitHubHostOK(req.URL) {
+		return fmt.Errorf("%w: to %s, not GitHub's download host", errOffGitHub, req.URL.Host)
+	}
+	return nil
+}
+
+// updateAway: no answer at all, or the host's own trouble — which says
+// nothing about what is published there, unlike an answer.
+func updateAway(err error) bool {
+	if err == nil || errors.Is(err, errOffGitHub) {
+		return false
+	}
+	var se statusError
+	if errors.As(err, &se) {
+		return int(se) >= 500 || int(se) == http.StatusTooManyRequests
+	}
+	return true
+}
+
+// Since when GitHub has been out of reach: kept in the install's directory,
+// so a restart does not start the grace again, and in memory for an install
+// whose directory cannot be written.
+var githubDownSince struct {
+	sync.Mutex
+	t time.Time
+}
+
+func githubDown(away bool) {
+	githubDownSince.Lock()
+	defer githubDownSince.Unlock()
+	p := ""
+	if dir := configDir(); dir != "" {
+		p = filepath.Join(dir, updateGitHubDownFile)
+	}
+	if !away {
+		githubDownSince.t = time.Time{}
+		if p != "" {
+			os.Remove(p)
+		}
+		return
+	}
+	if githubDownSince.t.IsZero() {
+		githubDownSince.t = time.Now()
+	}
+	if p != "" {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			os.WriteFile(p, []byte(strconv.FormatInt(githubDownSince.t.Unix(), 10)+"\n"), 0o600)
+		}
+	}
+}
+
+func githubDownLong() bool {
+	githubDownSince.Lock()
+	since := githubDownSince.t
+	githubDownSince.Unlock()
+	if dir := configDir(); dir != "" {
+		if b, err := os.ReadFile(filepath.Join(dir, updateGitHubDownFile)); err == nil {
+			if t, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil && t > 0 {
+				if ft := time.Unix(t, 0); since.IsZero() || ft.Before(since) {
+					since = ft
+				}
+			}
+		}
+	}
+	return !since.IsZero() && time.Since(since) >= updateGitHubGrace
 }
 
 // The same thing with the two facts about the world passed in rather than
@@ -662,6 +822,21 @@ func runUpdate(id string) (consoleResult, bool) {
 // including the ones that must not install anything, which are the branches
 // worth being sure about.
 func updateFrom(id, self, base string) (consoleResult, bool) {
+	return updateFromSrcs(id, self, []updateSrc{siteSrc(base)}, nil)
+}
+
+// updateOut is how one source's attempt ended.
+type updateOut struct {
+	code int
+	err  string
+	swap bool
+	// The source could not be reached: the next may be asked.
+	away bool
+}
+
+// updateFromSrcs asks each source in turn while the last could not be
+// reached and fallBack allows it.
+func updateFromSrcs(id, self string, srcs []updateSrc, fallBack func() bool) (consoleResult, bool) {
 	res := consoleResult{ID: id, Code: -1}
 	started := time.Now()
 
@@ -674,19 +849,40 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		log = append(log, s)
 		warnf("update: %s", s)
 	}
-	done := func(code int, errStr string) (consoleResult, bool) {
-		res.Code = code
-		res.Error = errStr
-		res.Ms = time.Since(started).Milliseconds()
-		res.Out = strings.Join(log, "\n") + "\n"
-		return res, false
-	}
-	fail := func() (consoleResult, bool) { return done(-1, "update-failed") }
-
 	// One deadline over the whole thing, so the numbers everything downstream
 	// waits on are bounded by a figure this side actually enforces.
 	ctx, cancel := context.WithTimeout(context.Background(), updateBudget)
 	defer cancel()
+	var out updateOut
+	for i, src := range srcs {
+		if i > 0 {
+			say("asking %s instead", src.label)
+		}
+		out = updateTry(ctx, self, src, say)
+		if src.github {
+			githubDown(out.away)
+		}
+		if !out.away || i == len(srcs)-1 {
+			break
+		}
+		if fallBack != nil && !fallBack() {
+			say("GitHub could not be reached; asked again at the next look (%s is asked once it has been out of reach for %d hours)",
+				srcs[i+1].label, int(updateGitHubGrace/time.Hour))
+			break
+		}
+	}
+	res.Code = out.code
+	res.Error = out.err
+	res.Ms = time.Since(started).Milliseconds()
+	res.Out = strings.Join(log, "\n") + "\n"
+	return res, out.swap
+}
+
+// updateTry is one source's attempt: its version, its manifest, the binary
+// by each road in turn, the checks, the swap.
+func updateTry(ctx context.Context, self string, src updateSrc, say func(string, ...any)) updateOut {
+	fail := func() updateOut { return updateOut{code: -1, err: "update-failed"} }
+	away := func() updateOut { return updateOut{code: -1, err: "update-failed", away: true} }
 	// The roads out, fastest measured first (roads.go): the release host
 	// is reached by the first that answers, and the download below moves
 	// to the next when one stalls. One road — the usual machine — is the
@@ -696,19 +892,24 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	var road string
 	var target string
 	var err error
+	allAway := true
 	for i, name := range roadsTry {
-		client = roadClient(name, updateProbeTimeout)
-		target, err = fetchText(ctx, client, base+"/VERSION")
+		client = src.client(name, updateProbeTimeout)
+		target, err = fetchText(ctx, client, src.version)
 		if err == nil {
 			road = name
 			break
 		}
+		allAway = allAway && updateAway(err)
 		if len(roadsTry) > 1 {
-			say("could not read the published version via %s: %v", roadLabel(name), err)
+			say("could not read the published version from %s via %s: %v", src.label, roadLabel(name), err)
 		} else {
-			say("could not read the published version: %v", err)
+			say("could not read the published version from %s: %v", src.label, err)
 		}
 		if i == len(roadsTry)-1 {
+			if allAway {
+				return away()
+			}
 			return fail()
 		}
 	}
@@ -717,7 +918,7 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		say("the published version is not a version this build will act on")
 		return fail()
 	}
-	say("running %s; published %s", helperVersion, target)
+	say("running %s; published %s on %s", helperVersion, target, src.label)
 
 	// Only forward. A bucket serving an OLDER version than the one running is
 	// either a rollback somebody performed deliberately — in which case
@@ -726,13 +927,15 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	// a button was pressed.
 	if vercmp(target, helperVersion) <= 0 {
 		say("already up to date — nothing to install")
+		// (an older release on GitHub than on this site is the order a
+		// release is published in, not a reason to ask this site)
 		// Marked so the page can say THIS rather than "done, the machine is
 		// restarting". Both end successfully and neither is an error, but only
 		// one of them is followed by a machine going quiet for half a minute,
 		// and telling somebody to expect that when it will not happen is how a
 		// working feature gets reported as broken. Release skew, a double
 		// press, and a rolled-back bucket all land here.
-		return done(0, "update-none")
+		return updateOut{code: 0, err: "update-none"}
 	}
 	// Said the moment the download begins, on the hourly pass as on a
 	// press: the reading goes out now with "installing", so the
@@ -741,11 +944,14 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	noteUpdatePass("installing")
 	wakePush()
 
-	asset := "subnsub-monitor-" + runtime.GOOS + "-" + runtime.GOARCH + exeSuffix()
+	asset := "subnsub-helper-" + runtime.GOOS + "-" + runtime.GOARCH + exeSuffix()
 
-	manifest, err := fetchText(ctx, client, base+"/SHA256SUMS")
+	manifest, err := fetchText(ctx, client, src.manifest(target))
 	if err != nil {
-		say("could not read the release manifest: %v", err)
+		say("could not read the release manifest from %s: %v", src.label, err)
+		if updateAway(err) {
+			return away()
+		}
 		return fail()
 	}
 	want := sumFor(manifest, asset)
@@ -781,8 +987,9 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	var h hash.Hash
 	var n int64
 	fetched := false
+	dlAway := true
 	for _, name := range dlRoads {
-		tmp, err := os.CreateTemp(filepath.Dir(self), ".subnsub-monitor-*"+exeSuffix())
+		tmp, err := os.CreateTemp(filepath.Dir(self), ".subnsub-helper-*"+exeSuffix())
 		if err != nil {
 			say("cannot write next to %s: %v", self, err)
 			// The overwhelmingly likely cause on Linux, and worth naming rather
@@ -798,21 +1005,22 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		}
 		tmpName = tmp.Name()
 		actx, acancel := context.WithCancel(ctx)
-		req, err := http.NewRequestWithContext(actx, "GET", base+"/"+asset, nil)
+		req, err := http.NewRequestWithContext(actx, "GET", src.file(target, asset), nil)
 		if err != nil {
 			acancel()
 			tmp.Close()
 			say("cannot build the download request")
 			return fail()
 		}
-		req.Header.Set("User-Agent", "subnsub-monitor")
-		dl := roadClient(name, 0)
+		req.Header.Set("User-Agent", "subnsub-helper")
+		dl := src.client(name, 0)
 		started := time.Now()
 		resp, err := dl.Do(req)
 		if err != nil {
 			acancel()
 			tmp.Close()
 			say("download via %s failed: %v", roadLabel(name), err)
+			dlAway = dlAway && updateAway(err)
 			continue
 		}
 		h = sha256.New()
@@ -829,6 +1037,7 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 		took := time.Since(started)
 		if resp.StatusCode != 200 {
 			say("download via %s failed: http %d", roadLabel(name), resp.StatusCode)
+			dlAway = dlAway && updateAway(errStatus(resp.StatusCode))
 			continue
 		}
 		if cerr != nil || closeErr != nil {
@@ -853,6 +1062,9 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	}
 	if !fetched {
 		say("download did not complete")
+		if dlAway {
+			return away()
+		}
 		return fail()
 	}
 
@@ -941,8 +1153,5 @@ func updateFrom(id, self, base string) (consoleResult, bool) {
 	// old version keeps running and this line must not have promised otherwise.
 	say("handing over to %s now", target)
 
-	res.Code = 0
-	res.Ms = time.Since(started).Milliseconds()
-	res.Out = strings.Join(log, "\n") + "\n"
-	return res, true
+	return updateOut{code: 0, swap: true}
 }

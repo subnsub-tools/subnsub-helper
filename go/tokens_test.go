@@ -267,7 +267,7 @@ func TestTokensWindowsAndKeptBuckets(t *testing.T) {
 			t.Fatalf("day row %v outside the window", r)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(home, ".config", "subnsub-monitor", "tokens.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, ".config", "subnsub-helper", "tokens.json")); err != nil {
 		t.Fatalf("tokens.json not written: %v", err)
 	}
 

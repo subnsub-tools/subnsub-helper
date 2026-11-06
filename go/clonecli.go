@@ -7,12 +7,12 @@ package main
    (clone.go), and the tailcat address of every machine it covers. That line
    is the whole copy, and it is a password until it expires.
 
-     subnsub-monitor clone use [line | -]   keep it here (clone-access, 0600);
+     subnsub-helper clone use [line | -]   keep it here (clone-access, 0600);
                                             no line, or "-", reads it from stdin
-     subnsub-monitor clone                  what it is, until when, which machines
-     subnsub-monitor clone forget           delete it
-     subnsub-monitor run <machine> [--] <command…>
-     subnsub-monitor shell <machine>
+     subnsub-helper clone                  what it is, until when, which machines
+     subnsub-helper clone forget           delete it
+     subnsub-helper run <machine> [--] <command…>
+     subnsub-helper shell <machine>
 
    SUBNSUB_CLONE=<line> stands in for the kept file, for one-off use.
 
@@ -146,7 +146,7 @@ func loadCloneAccess() (cloneAccess, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cloneAccess{}, errors.New("no portable copy here — on the Monitor page press Create and copy (Manage → Copies), then: subnsub-monitor clone use")
+			return cloneAccess{}, errors.New("no portable copy here — on the Monitor page press Create and copy (Manage → Copies), then: subnsub-helper clone use")
 		}
 		return cloneAccess{}, err
 	}
@@ -284,7 +284,7 @@ func runCloneCLI(args []string) int {
 			return 1
 		}
 		printCloneSummary(a)
-		fmt.Println("kept in " + path + " — try: subnsub-monitor run <machine> -- uname -a")
+		fmt.Println("kept in " + path + " — try: subnsub-helper run <machine> -- uname -a")
 		return 0
 	case "forget":
 		path := cloneAccessPath()
@@ -297,7 +297,7 @@ func runCloneCLI(args []string) int {
 		fmt.Println("forgotten")
 		return 0
 	}
-	warnf("usage: subnsub-monitor clone [use <line>|-] | clone forget")
+	warnf("usage: subnsub-helper clone [use <line>|-] | clone forget")
 	return 2
 }
 
@@ -420,7 +420,7 @@ func (c *cloneConn) command(ctx context.Context, kind, cmd, target string) (cons
 func cloneRefusal(code string) string {
 	switch code {
 	case "console-off":
-		return "the console is off on that machine (subnsub-monitor console on, there)"
+		return "the console is off on that machine (subnsub-helper console on, there)"
 	case "clone-not-allowed":
 		return "this copy may not do that"
 	case "clone-expired":
@@ -471,7 +471,7 @@ func runRunCLI(args []string) int {
 	}
 	line := strings.Join(rest, " ")
 	if strings.TrimSpace(line) == "" {
-		warnf("usage: subnsub-monitor run <machine> [--] <command…>")
+		warnf("usage: subnsub-helper run <machine> [--] <command…>")
 		return 2
 	}
 	if len(line) > 2000 {
@@ -513,7 +513,7 @@ func runShellCLI(args []string) int {
 		return 2
 	}
 	if len(rest) > 0 {
-		warnf("shell takes no command — use: subnsub-monitor run %s -- …", args[0])
+		warnf("shell takes no command — use: subnsub-helper run %s -- …", args[0])
 		return 2
 	}
 	ctx, cancel := context.WithCancel(context.Background())
