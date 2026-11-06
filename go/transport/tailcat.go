@@ -27,8 +27,11 @@ package transport
 // endpoint this machine knows — the STUN-learned public ip:port and the
 // addresses of its interfaces — sealed to that peer's key, so the peer can
 // read them. That is how a direct path forms at all, and upstream has no
-// per-peer filter. The peers are the browsers the owner allowed and the
-// portable copies the owner made (clone.go).
+// per-peer filter. The peers are the browsers the owner allowed, the
+// portable copies the owner made (clone.go) and the owner's other computers
+// fetching a file under a read-only grant (filesgrant.go, filesfetch.go):
+// each side of such a copy learns the other's endpoints, which is how the
+// copy goes straight across, and both are the owner's own machines.
 //
 // Three boundaries, and where each is enforced:
 //

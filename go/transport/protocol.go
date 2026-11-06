@@ -148,6 +148,23 @@ const (
 	// system's trash (fileswrite.go) — under the same grant as CapFiles. A
 	// helper that names files without it only reads.
 	CapFilesWrite = "files-write"
+	// CapFilesGrant: another of the owner's computers may read files here
+	// under a read-only grant a pinned dashboard signed, over this tunnel
+	// (filesgrant.go) — named where the tunnel is up to be dialled.
+	CapFilesGrant = "files-grant"
+	// CapFilesFetch: this machine fetches files from another one itself,
+	// under such a grant, and puts them in a folder here (filesfetch.go):
+	// a copy between two computers that does not pass through the page.
+	CapFilesFetch = "files-fetch"
+	// CapSpeed: the Speed tab may measure the road between this browser
+	// and the machine (helper speed.go) — bytes down, bytes up, a round
+	// trip. Named to an allowlisted browser.
+	CapSpeed = "speed"
+	// CapSpeedPeer: the machine measures the road to another of the
+	// owner's computers itself, and is measured by one, under a grant a
+	// pinned dashboard signed (helper speedpeer.go) — where the console
+	// is on, as a copy between two computers is.
+	CapSpeedPeer = "speed-peer"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on

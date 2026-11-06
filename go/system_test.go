@@ -229,6 +229,12 @@ func TestSnapshotCarriesNoIdentity(t *testing.T) {
 		// 2026-10-26, asked for by the operator: a history of the temperature.
 		// One number, the processor's or the hottest, and which of the two.
 		"temp_main_c": true, "temp_main_cpu": true,
+		// 2026-11-05, asked for by the operator: what the machine is, so the
+		// page can draw a MacBook as a MacBook and a NAS as a NAS. Vendor,
+		// model name, Apple's model identifier, a shape and a NAS's system —
+		// a product line, never the serial or UUID that name one unit
+		// (device.go, TestDeviceCarriesNoSerial).
+		"device": true,
 	}
 	for _, k := range topLevelKeys(blob) {
 		if !allowed[k] {

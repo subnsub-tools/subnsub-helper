@@ -422,6 +422,9 @@ func runDirect(ctx context.Context) {
 	startIPv4()
 	go runTailnet(ctx)
 	musicStart()
+	// Copies from another computer that were under way when this helper
+	// last stopped (filesfetch.go).
+	fetchResume()
 	conf := configDir()
 	if conf == "" {
 		warnf("direct: no home directory, cannot keep a tunnel identity")
@@ -446,9 +449,11 @@ func runDirect(ctx context.Context) {
 			StateDir:   conf,
 			DERPMapURL: derpMapURL(),
 			Port:       directPort,
-			// The file, and the portable copies still current (clone.go).
+			// The file, the portable copies still current (clone.go) and
+			// the read-only grants another computer is copying under
+			// (filesgrant.go).
 			Allowed: func() []key.NodePublic {
-				return append(loadAllowedClients(), activeCloneNodes()...)
+				return append(append(loadAllowedClients(), activeCloneNodes()...), activeGrantNodes()...)
 			},
 			Handler: h,
 		})
@@ -517,7 +522,7 @@ func serveDirect(ctx context.Context, tc *transport.Tailcat) {
 					warnf("direct: allowed a new browser")
 				}
 			}
-			for _, k := range activeCloneNodes() {
+			for _, k := range append(activeCloneNodes(), activeGrantNodes()...) {
 				if !tc.Known(k) {
 					tc.AddAllowed(k)
 				}
@@ -590,6 +595,11 @@ func newDirectHandler() *directHandler {
 	// A piece of a file coming in (fileswrite.go), by the token a signed
 	// put gave this peer.
 	h.mux.HandleFunc("/v1/files/put", h.filesPutPiece)
+	// The Speed tab's end of a measurement (speed.go): bytes down, bytes up,
+	// a round trip.
+	h.mux.HandleFunc("/v1/speed/ping", h.speed)
+	h.mux.HandleFunc("/v1/speed/down", h.speed)
+	h.mux.HandleFunc("/v1/speed/up", h.speed)
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusNotFound, "unknown-frame")
 	})
@@ -601,7 +611,8 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// and the pieces of a file the Files tab puts here. Anything else is not
 	// a frame this road knows.
 	switch r.URL.Path {
-	case "/v1/command", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close", "/v1/files/put":
+	case "/v1/command", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close", "/v1/files/put",
+		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done", "/v1/speed/up":
 		if r.Method != http.MethodPost {
 			h.refuse(w, http.StatusMethodNotAllowed, "unknown-frame")
 			return
@@ -618,6 +629,12 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// away whatever it asks, before any signature is looked at. A request
 	// with no attributed peer (a test driving the handler) has none to check.
 	if k, ok := transport.PeerFromContext(r.Context()); ok && !tailnetAdmitted(k) {
+		// A key let in by a read-only grant alone (filesgrant.go): its few
+		// paths and nothing the mux would answer anyone else.
+		if len(grantsForNode(k, time.Now())) > 0 {
+			h.grantServe(w, r, k)
+			return
+		}
 		h.refuse(w, http.StatusForbidden, "not-allowed")
 		return
 	}
@@ -750,12 +767,12 @@ func directCaps() []string {
 func directCapsFor(r *http.Request) []string {
 	caps := directCaps()
 	music, files := musicOn(), filesOn()
-	if !music && !files {
-		return caps
-	}
 	if k, ok := transport.PeerFromContext(r.Context()); ok {
 		for _, a := range loadAllowedClients() {
 			if a == k {
+				// The Speed tab's end of a measurement (speed.go): to every
+				// browser on the list, whatever the switches.
+				caps = append(caps, transport.CapSpeed)
 				if music {
 					caps = append(caps, transport.CapMusic)
 				}
@@ -764,6 +781,17 @@ func directCapsFor(r *http.Request) []string {
 				// the same browsers music is.
 				if files {
 					caps = append(caps, transport.CapFiles, transport.CapFilesWrite)
+					// Copies between two computers helper to helper
+					// (filesgrant.go, filesfetch.go): this one lets another
+					// read under a grant, and fetches from one itself.
+					if directAddress() != "" {
+						caps = append(caps, transport.CapFilesGrant)
+					}
+					caps = append(caps, transport.CapFilesFetch)
+					// A measurement between this computer and another
+					// (speedpeer.go): run from here, or measured here under
+					// a grant — the console's grant, as a copy's is.
+					caps = append(caps, transport.CapSpeedPeer)
 				}
 				return caps
 			}

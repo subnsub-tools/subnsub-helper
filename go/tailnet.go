@@ -15,8 +15,11 @@ package main
 // control plane decides who holds an address on it. So nothing here rests on
 // the network. A reader opens a session with the machine's X25519 key, which it
 // learned through the tunnel (hello), and with its own key, which must be on the
-// machine's list. Every request and every response inside is sealed to that
-// session. What a peer on the tailnet sees of this port is that it exists.
+// machine's list, or be the key of another computer's helper fetching files
+// from here under a read-only grant (filesgrant.go, filesfetch.go), which gets
+// the grant's few paths and nothing else. Every request and every response
+// inside is sealed to that session. What a peer on the tailnet sees of this
+// port is that it exists.
 //
 //	derive: HKDF-SHA256 over DH(reader, machine) || DH(reader's ephemeral,
 //	        machine's ephemeral), so a key taken later opens no recorded session
@@ -131,6 +134,11 @@ func tailnetAdmitted(k key.NodePublic) bool {
 	_, ok := cloneForNode(k, agentID(), time.Now())
 	return ok
 }
+
+// tailnetLetIn is who this port opens a session for: the list, and a key
+// holding a read-only grant here, which the door then keeps to the grant's
+// paths (directHandler.ServeHTTP).
+func tailnetLetIn(k key.NodePublic) bool { return tailnetAdmitted(k) || grantHeld(k) }
 
 // ── finding the network ─────────────────────────────────────────────────
 
@@ -500,7 +508,7 @@ func (t *tailnetServer) open(w http.ResponseWriter, r *http.Request) {
 	}
 	// The list first: a key not on it costs this machine nothing, and is told
 	// nothing but no.
-	if !tailnetAdmitted(node) {
+	if !tailnetLetIn(node) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -564,10 +572,12 @@ func tailnetInnerOK(p string) bool {
 	case "/v1/hello", "/v1/snapshot", "/v1/events", "/v1/command", "/v1/history",
 		"/v1/pty/out", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close",
 		"/v1/music", "/v1/music/index", "/v1/music/file", "/v1/music/art",
-		"/v1/files/search", "/v1/files/file", "/v1/files/put":
+		"/v1/files/search", "/v1/files/file", "/v1/files/put",
+		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done":
 		return true
 	}
-	return false
+	// The Speed tab's end of a measurement (speed.go).
+	return speedPath(p)
 }
 
 func (t *tailnetServer) rpc(w http.ResponseWriter, r *http.Request) {
@@ -656,7 +666,7 @@ func (t *tailnetServer) rpc(w http.ResponseWriter, r *http.Request) {
 		refuseAs(rw, agentID(), http.StatusServiceUnavailable, "unavailable")
 	case ierr != nil || berr != nil || !tailnetInnerOK(inner.Path):
 		refuseAs(rw, agentID(), http.StatusNotFound, "unknown-frame")
-	case !tailnetAdmitted(s.peer):
+	case !tailnetLetIn(s.peer):
 		// Struck since the session opened: told as the tunnel's gate tells it,
 		// and the session goes with it.
 		t.mu.Lock()

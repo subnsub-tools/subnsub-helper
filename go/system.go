@@ -60,6 +60,11 @@ type System struct {
 	// Kernel release, cut to major.minor. Never the full uname string.
 	OSVersion *string `json:"os_version,omitempty"`
 
+	// What the machine is: a Mac mini or a MacBook, a Synology, a Raspberry
+	// Pi, a cloud VM (device.go). A product line and a model name, never
+	// anything that tells one machine of that model from another.
+	Device *Device `json:"device,omitempty"`
+
 	CPUCount   int      `json:"cpu_count,omitempty"`
 	CPUPercent *float64 `json:"cpu_percent,omitempty"` // 0–100, differential
 
@@ -600,7 +605,7 @@ func collectSystem() (s System) {
 // net.Interfaces() is stdlib on every target, so a platform with no collector
 // of its own still reports its addresses rather than nothing.
 func baseSystem() System {
-	s := System{Platform: runtime.GOOS, Arch: runtime.GOARCH, CPUCount: runtime.NumCPU()}
+	s := System{Platform: runtime.GOOS, Arch: runtime.GOARCH, CPUCount: runtime.NumCPU(), Device: machineDevice()}
 	fillNICs(&s)
 	return s
 }

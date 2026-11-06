@@ -282,7 +282,10 @@ type filesJob struct {
 	tok    string
 	peer   key.NodePublic
 	signer ed25519.PublicKey // the key that signed the question: unpinned, the search is over
-	match  func(string) bool
+	// The read-only grant a walk was started under (filesgrant.go), "" for
+	// a browser's: revoked or run out, its pages are over too.
+	grant string
+	match func(string) bool
 	// A walk (filesStartWalk): every entry, hidden ones and packages'
 	// insides too, links named as links; its own limits.
 	every  bool
@@ -492,7 +495,7 @@ func filesStartSearch(peer key.NodePublic, signer ed25519.PublicKey, q, in strin
 
 // filesStartWalk is a walk of the tree under in, for a copy: every entry,
 // as it is found, by the same token and pages as a search's.
-func filesStartWalk(peer key.NodePublic, signer ed25519.PublicKey, in string) (string, string) {
+func filesStartWalk(peer key.NodePublic, signer ed25519.PublicKey, grant, in string) (string, string) {
 	if in == "" {
 		return "", "bad-args"
 	}
@@ -522,7 +525,7 @@ func filesStartWalk(peer key.NodePublic, signer ed25519.PublicKey, in string) (s
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), filesWalkTime)
 	now := time.Now()
-	j := &filesJob{tok: tok, peer: peer, signer: signer, every: true, limit: filesWalkLimit, page: filesWalkPage,
+	j := &filesJob{tok: tok, peer: peer, signer: signer, grant: grant, every: true, limit: filesWalkLimit, page: filesWalkPage,
 		roots: roots, cancel: cancel, start: now, seen: now, wake: make(chan struct{})}
 	filesJobs.m[tok] = j
 	filesWalks.Add(1)
@@ -869,9 +872,11 @@ type filesPage struct {
 type filesOpen struct {
 	peer   key.NodePublic
 	signer ed25519.PublicKey
+	grant  string // the read-only grant it was opened under, "" for a browser's
 	p      string
 	size   int64
 	mod    time.Time
+	id     os.FileInfo // the file it is, so a name made to lead elsewhere reads nothing
 	seen   time.Time
 }
 
@@ -901,6 +906,7 @@ type filesLooked struct {
 	p    string
 	size int64
 	mod  time.Time
+	id   os.FileInfo // the file opened, as its descriptor says (os.SameFile)
 }
 
 func filesOpenFile(peer key.NodePublic, signer ed25519.PublicKey, raw string) (filesOpenBody, string) {
@@ -914,6 +920,13 @@ func filesOpenFile(peer key.NodePublic, signer ed25519.PublicKey, raw string) (f
 	if code != "" {
 		return b, code
 	}
+	return filesOpenToken(peer, signer, "", got)
+}
+
+// filesOpenToken is the token for a file looked at, bound to the peer that
+// asked, the key that signed the asking and, for a grant's key, the grant.
+func filesOpenToken(peer key.NodePublic, signer ed25519.PublicKey, grant string, got filesLooked) (filesOpenBody, string) {
+	var b filesOpenBody
 	tok := filesToken()
 	if tok == "" {
 		return b, "unavailable"
@@ -932,7 +945,7 @@ func filesOpenFile(peer key.NodePublic, signer ed25519.PublicKey, raw string) (f
 		}
 		delete(filesOpened.m, old)
 	}
-	filesOpened.m[tok] = &filesOpen{peer: peer, signer: signer, p: got.p, size: got.size, mod: got.mod, seen: time.Now()}
+	filesOpened.m[tok] = &filesOpen{peer: peer, signer: signer, grant: grant, p: got.p, size: got.size, mod: got.mod, id: got.id, seen: time.Now()}
 	filesOpened.Unlock()
 	return filesOpenBody{T: tok, N: filepath.Base(got.p), S: got.size, M: got.mod.Unix(), Max: filesReadMax, Path: got.p}, ""
 }
@@ -964,8 +977,14 @@ func filesLookAt(p string) (filesLooked, string) {
 		}
 		return b, "unavailable"
 	}
-	f.Close()
-	return filesLooked{p: p, size: fi.Size(), mod: fi.ModTime()}, ""
+	defer f.Close()
+	// The file opened is the one looked at: its identity is what every
+	// piece is read from later, whatever the name comes to lead to.
+	id, err := f.Stat()
+	if err != nil || !os.SameFile(id, fi) {
+		return b, "changed"
+	}
+	return filesLooked{p: p, size: fi.Size(), mod: fi.ModTime(), id: id}, ""
 }
 
 // ── the doors ───────────────────────────────────────────────────────────
@@ -990,6 +1009,19 @@ type filesArgs struct {
 	// put with mode replace: the size and modified time the page saw of
 	// the file it replaces (fileswrite.go filesWasArg).
 	Was json.RawMessage `json:"was"`
+	// grant: the read-only grant to keep (filesgrant.go); grant-revoke:
+	// its id.
+	Cert string `json:"cert"`
+	ID   string `json:"id"`
+	// fetch-key, fetch, fetch-status, fetch-stop (filesfetch.go).
+	Job    string      `json:"job"`
+	From   fetchFrom   `json:"from"`
+	Grant  string      `json:"grant"`
+	Items  []fetchItem `json:"items"`
+	Mv     bool        `json:"mv"`
+	Forget bool        `json:"forget"`
+	// speed-run (speedpeer.go): seconds each way.
+	Secs int `json:"secs"`
 }
 
 // runFilesCommand is a signed files command, from the tunnel's command door
@@ -1030,7 +1062,7 @@ func runFilesCommand(c consoleCmd, peer key.NodePublic, hasPeer bool, signer ed2
 		}
 		out = map[string]any{"t": tok, "page": filesSearchPage, "hits": filesSearchHits, "secs": int(filesSearchTime / time.Second)}
 	case "walk":
-		tok, code := filesStartWalk(peer, signer, arg.In)
+		tok, code := filesStartWalk(peer, signer, "", arg.In)
 		if code != "" {
 			res.Error = code
 			return res
@@ -1046,6 +1078,27 @@ func runFilesCommand(c consoleCmd, peer key.NodePublic, hasPeer bool, signer ed2
 		out = map[string]any{}
 	case "open":
 		body, code := filesOpenFile(peer, signer, arg.Path)
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		out = body
+	case "grant", "grant-revoke":
+		body, code := runGrantCommand(c.Target, signer, arg)
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		out = body
+	case "fetch-key", "fetch", "fetch-status", "fetch-stop":
+		body, code := runFetchCommand(c.Target, signer, arg)
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		out = body
+	case "speed-key", "speed-run", "speed-status", "speed-stop":
+		body, code := runSpeedCommand(c.Target, signer, arg)
 		if code != "" {
 			res.Error = code
 			return res
@@ -1105,11 +1158,17 @@ func (h *directHandler) filesSearch(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	h.filesSearchFor(w, r, peer)
+}
+
+// filesSearchFor is filesSearch for a peer the door has judged: an
+// allowlisted browser (filesPeer) or a grant's key (grantServe).
+func (h *directHandler) filesSearchFor(w http.ResponseWriter, r *http.Request, peer key.NodePublic) {
 	tok := r.URL.Query().Get("s")
 	filesJobs.Lock()
 	j := filesJobs.m[tok]
 	filesJobs.Unlock()
-	if j == nil || tok == "" || j.peer != peer || !filesSignerOK(j.signer) {
+	if j == nil || tok == "" || j.peer != peer || !filesSignerOK(j.signer) || (j.grant != "" && !grantLive(j.grant, peer)) {
 		h.refuse(w, http.StatusNotFound, "no-search")
 		return
 	}
@@ -1209,23 +1268,38 @@ func (h *directHandler) filesFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	h.filesFileFor(w, r, peer)
+}
+
+// filesFileFor is filesFile for a peer the door has judged.
+func (h *directHandler) filesFileFor(w http.ResponseWriter, r *http.Request, peer key.NodePublic) {
 	tok := r.URL.Query().Get("s")
 	filesOpened.Lock()
 	o := filesOpened.m[tok]
 	var p string
 	var size int64
 	var mod time.Time
+	var id os.FileInfo
 	now := time.Now()
 	if o != nil && (now.Sub(o.seen) > filesOpenKeep || !filesSignerOK(o.signer)) {
 		// Run out, or its key unpinned since: gone, whatever the sweep's clock says.
 		delete(filesOpened.m, tok)
 		o = nil
 	}
+	grant := ""
 	if o != nil && tok != "" && o.peer == peer {
 		o.seen = now
-		p, size, mod = o.p, o.size, o.mod
+		p, size, mod, grant, id = o.p, o.size, o.mod, o.grant, o.id
 	}
 	filesOpened.Unlock()
+	if p != "" && grant != "" && !grantLive(grant, peer) {
+		// Opened under a grant revoked or run out since: looked at outside
+		// the lock, since it reads the grants file.
+		filesOpened.Lock()
+		delete(filesOpened.m, tok)
+		filesOpened.Unlock()
+		p = ""
+	}
 	if p == "" {
 		h.refuse(w, http.StatusNotFound, "no-file")
 		return
@@ -1261,8 +1335,10 @@ func (h *directHandler) filesFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	// The file as it was opened, or the page is told it changed: pieces of
-	// two different files make neither.
-	if fi, err := f.Stat(); err != nil || fi.Size() != size || !fi.ModTime().Equal(mod) {
+	// two different files make neither. The same file, too, not another
+	// put where its name was (a link swapped into its path would otherwise
+	// lead a grant's reads outside its roots).
+	if fi, err := f.Stat(); err != nil || fi.Size() != size || !fi.ModTime().Equal(mod) || (id != nil && !os.SameFile(fi, id)) {
 		h.refuse(w, http.StatusConflict, "changed")
 		return
 	}
