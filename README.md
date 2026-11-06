@@ -97,7 +97,13 @@ The `<TOKEN>` comes from your signed-in Monitor dashboard. You can use the same 
 
 When copied from a signed-in dashboard, the install command also sets `MON_PUBKEY=…` to pin your dashboard's Ed25519 public key in `~/.config/subnsub-helper/trusted-keys` (see [Command signing (`trust`)](#command-signing-trust)).
 
-**Inline checksum verification:** `install.sh` embeds the expected SHA-256 checksums for every published binary directly in the script (`SUM_*`). It downloads the binary from this repository's release of its version first, and from `tools.subnsub.com` only when GitHub cannot be reached; the embedded checksum decides either way. Each release here carries the stamped `install.sh` too. Verify downloaded scripts against [`install.sh`](install.sh) in this repository or build from source to confirm binary reproducibility.
+**Inline checksum verification:** `install.sh` embeds the expected SHA-256 checksums for every published binary directly in the script (`SUM_*`). It downloads the binary from this repository's release of its version first, and from `tools.subnsub.com` only when GitHub cannot be reached; the embedded checksum decides either way, and the site serves the same files as the release.
+
+**Where the binaries come from:** every release is built by this repository's [release workflow](.github/workflows/release.yml) on GitHub's runners, from the tagged source: it runs the tests, builds the binaries with `go/build.sh`, stamps `install.sh` with their checksums (`go/stamp-install.sh`) and attaches a signed build provenance attestation to each binary. To check that a binary was built there, from that tag:
+
+```sh
+gh attestation verify subnsub-helper-linux-amd64 --repo subnsub-tools/subnsub-helper
+``` Verify downloaded scripts against [`install.sh`](install.sh) in this repository or build from source to confirm binary reproducibility.
 
 **Platform notes:**
 - **FreeBSD:** Because FreeBSD has no default per-user service manager, `install.sh` installs the binary and token without modifying system files, then prints a ready-to-use `daemon(8)` command and an `/etc/rc.d` script you can install if desired.

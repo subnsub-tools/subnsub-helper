@@ -1,0 +1,97 @@
+# Builds the helper and publishes its release, from the source at a tag.
+#
+# A tag v<version> (YYYY.MM.DD.N, matching go/version.go) builds, tests and
+# publishes a DRAFT release: the eight binaries, SHA256SUMS, VERSION and
+# install.sh stamped with those checksums, each binary with a signed build
+# provenance attestation that names this workflow and the tagged commit.
+# The maintainers check the draft against a live machine and then publish
+# it; only a published release is the one helpers update to
+# (releases/latest/download/VERSION). The site's copies
+# (tools.subnsub.com/monitor) are taken from the published release.
+#
+# Anyone can check that a binary came from here, built from the tag:
+#
+#   gh attestation verify subnsub-helper-linux-amd64 --repo subnsub-tools/subnsub-helper
+#
+# Run by hand (workflow_dispatch), it builds and tests the branch and prints
+# the checksums, and publishes nothing.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write       # the draft release
+      id-token: write       # the attestations' signing certificate
+      attestations: write
+    env:
+      GOTOOLCHAIN: auto     # the exact Go go/go.mod names
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Version
+        run: |
+          v=$(sed -n 's/^const helperVersion = "\(.*\)"$/\1/p' go/version.go)
+          case "$v" in
+            [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*) ;;
+            *) echo "go/version.go holds '$v', not YYYY.MM.DD.N"; exit 1 ;;
+          esac
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "tag $GITHUB_REF_NAME, but go/version.go says $v"; exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Test
+        working-directory: go
+        run: |
+          go version
+          go vet ./...
+          GOOS=windows go vet ./...
+          go test ./...
+
+      - name: Build
+        run: |
+          sh go/build.sh "$PWD/dist"
+          printf '%s\n' "$VERSION" > dist/VERSION
+          said=$(dist/subnsub-helper-linux-amd64 version)
+          [ "$said" = "$VERSION" ] || { echo "the build calls itself '$said', not $VERSION"; exit 1; }
+          cp install.sh dist/install.sh
+          sh go/stamp-install.sh dist dist/install.sh "$VERSION"
+          cat dist/SHA256SUMS
+          { echo '```'; cat dist/SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          subnsub-helper $VERSION, built from this tag by the release workflow.
+
+          Install (the token is on the Monitor page):
+
+              curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/install.sh | sh -s -- <TOKEN>
+
+          install.sh carries every binary's SHA-256; SHA256SUMS lists them too. Check where a binary was built:
+
+              gh attestation verify subnsub-helper-linux-amd64 --repo $GITHUB_REPOSITORY
+          NOTES
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "$VERSION" --notes-file notes.md \
+            dist/VERSION dist/SHA256SUMS dist/install.sh dist/subnsub-helper-*
