@@ -571,6 +571,7 @@ func tailnetInnerOK(p string) bool {
 	switch p {
 	case "/v1/hello", "/v1/snapshot", "/v1/events", "/v1/command", "/v1/history",
 		"/v1/pty/out", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close",
+		"/v1/screen/out", "/v1/screen/in", "/v1/screen/beat", "/v1/screen/close",
 		"/v1/music", "/v1/music/index", "/v1/music/file", "/v1/music/art",
 		"/v1/files/search", "/v1/files/file", "/v1/files/put",
 		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done",

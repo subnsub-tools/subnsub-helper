@@ -560,6 +560,8 @@ type directHandler struct {
 	// handler's — a handler is made anew for every carrier, and a session
 	// outlives a carrier rebuild so the page can attach again by its token.
 	ptys *ptyHub
+	// The screens' sessions (screen.go), likewise the process's one table.
+	screens *screenHub
 
 	streams struct {
 		sync.Mutex
@@ -573,7 +575,7 @@ type directHandler struct {
 }
 
 func newDirectHandler() *directHandler {
-	h := &directHandler{mux: http.NewServeMux(), ptys: ptySessions}
+	h := &directHandler{mux: http.NewServeMux(), ptys: ptySessions, screens: screenSessions}
 	h.mux.HandleFunc("/v1/hello", h.hello)
 	h.mux.HandleFunc("/v1/snapshot", h.snapshot)
 	h.mux.HandleFunc("/v1/events", h.events)
@@ -583,6 +585,11 @@ func newDirectHandler() *directHandler {
 	h.mux.HandleFunc("/v1/pty/in", h.ptyIn)
 	h.mux.HandleFunc("/v1/pty/resize", h.ptyResize)
 	h.mux.HandleFunc("/v1/pty/close", h.ptyClose)
+	// A machine's screen (screen.go): its own VNC server's bytes, both ways.
+	h.mux.HandleFunc("/v1/screen/out", h.screenOut)
+	h.mux.HandleFunc("/v1/screen/in", h.screenIn)
+	h.mux.HandleFunc("/v1/screen/beat", h.screenBeat)
+	h.mux.HandleFunc("/v1/screen/close", h.screenClose)
 	// The shared music (music.go): reads only, for an allowlisted key.
 	h.mux.HandleFunc("/v1/music", h.musicStatus)
 	h.mux.HandleFunc("/v1/music/index", h.musicIndex)
@@ -615,6 +622,7 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// a frame this road knows.
 	switch r.URL.Path {
 	case "/v1/command", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close", "/v1/files/put",
+		"/v1/screen/in", "/v1/screen/beat", "/v1/screen/close",
 		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done", "/v1/speed/up":
 		if r.Method != http.MethodPost {
 			h.refuse(w, http.StatusMethodNotAllowed, "unknown-frame")
@@ -779,6 +787,12 @@ func directCapsFor(r *http.Request) []string {
 				// The map of who reaches whom on its tailnet (tsview.go):
 				// read-only, whatever the switches.
 				caps = append(caps, transport.CapTailnetMap)
+				// The machine's screen (screen.go): the console's grant, to a
+				// browser on the list and not a portable copy, where a key is
+				// pinned.
+				if screenEnabled() && loadTrust().sealed {
+					caps = append(caps, transport.CapScreen)
+				}
 				if music {
 					caps = append(caps, transport.CapMusic)
 				}
@@ -909,6 +923,19 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 					res.Error = why
 				} else {
 					res = consoleResult{ID: c.ID, Kind: "pty", Code: 0, Out: tok}
+				}
+			}
+		} else if c.Kind == "screen" {
+			// A screen session (screen.go): this road's alone, like a
+			// terminal, and not a portable copy's — its certificate names
+			// nothing of it.
+			releaseCmd()
+			res = consoleResult{ID: c.ID, Kind: "screen", Code: -1, Error: "not-allowed"}
+			if peer, ok := transport.PeerFromContext(r.Context()); ok && clone == nil {
+				if tok, why := h.screens.open(peer, commandSigner(c, id, loadTrust())); why != "" {
+					res.Error = why
+				} else {
+					res = consoleResult{ID: c.ID, Kind: "screen", Code: 0, Out: tok}
 				}
 			}
 		} else if c.Kind == "files" {

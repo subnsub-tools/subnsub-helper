@@ -179,6 +179,10 @@ const (
 	// network, devices and access rules (helper tsview.go), for the map of
 	// who reaches whom. Named to an allowlisted browser; read-only.
 	CapTailnetMap = "tailnet-map"
+	// CapScreen: the machine's own VNC server, carried through this tunnel
+	// to the page's viewer (helper screen.go). The console's switch and a
+	// pinned key, to an allowlisted browser; MON_SCREEN=off turns it off.
+	CapScreen = "screen"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on

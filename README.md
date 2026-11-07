@@ -131,8 +131,8 @@ The Direct card on the Monitor page generates a browser node key and prints this
 
 - **Zero server-side storage:** The DERP relay forwards encrypted WireGuard packets only. By default the helper uses the public tailcat DERP map; pass `--derpmap` / `MON_DERPMAP` to use your own DERP server. All metrics and 30-day history stay on the machine and in your browser.
 - **Relay features not present in standalone direct mode:** Cloud presence history, relay-stored trends while the machine is unreachable, cloud session archiving, web push notifications, and cross-machine account folding require an account and relay connection.
-- **Read-only by default:** The tunnel only starts when at least one browser key is listed in `~/.config/subnsub-helper/allowed-clients` (`subnsub-helper allow <key>` / `disallow <key>`). Allowing a browser node key grants **read-only** observation (`hello`, snapshots, 1 Hz health stream, and local history). Commands and interactive terminals require the browser's Ed25519 signing key to be pinned in `trusted-keys` (`MON_PUBKEY` or `subnsub-helper trust <key>`).
-- **Hybrid mode (Relay + Direct):** When configured with both a relay token and `--direct`, both transports run side by side. Interactive terminals and plaintext shell commands always travel exclusively over the direct tunnel, never through the relay. Set `MON_TRANSPORT=relay` or `MON_TRANSPORT=tailcat` to force a single transport.
+- **Read-only by default:** The tunnel only starts when at least one browser key is listed in `~/.config/subnsub-helper/allowed-clients` (`subnsub-helper allow <key>` / `disallow <key>`). Allowing a browser node key grants **read-only** observation (`hello`, snapshots, 1 Hz health stream, and local history). Commands, interactive terminals and the machine's screen require the browser's Ed25519 signing key to be pinned in `trusted-keys` (`MON_PUBKEY` or `subnsub-helper trust <key>`).
+- **Hybrid mode (Relay + Direct):** When configured with both a relay token and `--direct`, both transports run side by side. Interactive terminals, the machine's screen and plaintext shell commands always travel exclusively over the direct tunnel, never through the relay. Set `MON_TRANSPORT=relay` or `MON_TRANSPORT=tailcat` to force a single transport.
 - **CLI controls:** `subnsub-helper direct on|off`, `allow`, `disallow`, and `address` (prints the direct address and node key, and a pairing still waiting). From helper 2026.11.05.1 there is no transfer pipe: browsers send files to each other over tailcat with no machine in the middle, so `transfer` only says so, and `MON_TRANSFER` and the `no-transfer` file are no longer read.
 
 ### Tailnet road
@@ -141,7 +141,7 @@ From helper 2026.11.03.1, a machine in direct mode that is on a Tailscale networ
 
 - **Found without the CLI:** the address comes from the machine's interfaces and the name from Tailscale's resolver at `100.100.100.100` (`tailnet.go`). Nothing listens while Tailscale is down or no browser key is allowed. `MON_TAILNET=off` keeps the port closed.
 - **The network is not trusted:** anything on the tailnet can reach the port. A browser takes the machine's X25519 key from a hello that came through the tunnel, its own key must be on `allowed-clients`, and a session is derived from both plus a fresh key on each side (HKDF-SHA256). Every request and answer is AES-256-GCM to that session, numbered so none can be replayed, cut short or moved. A struck key is refused on its next request.
-- **What it carries:** the same read-only view, commands, terminals, music and files as the tunnel.
+- **What it carries:** the same read-only view, commands, terminals, screens, music and files as the tunnel.
 - **Browsers:** Chrome, which can reach a local network address from an https page once the user allows local network access. Other browsers stay on the tunnel. See [the Monitor docs](https://tools.subnsub.com/monitor-docs) for the API.
 
 ### Music
@@ -276,6 +276,7 @@ Enabling the console creates `~/.config/subnsub-helper/console` (`MON_CONSOLE=1`
 
 **Transport paths for commands:**
 - **Direct tunnel (`direct.go`, `pty.go`):** Interactive PTY terminals (`>_`) and standard shell commands travel exclusively over the end-to-end encrypted WireGuard tunnel. The relay's command mailbox refuses plaintext shell commands outright (`mailboxRefusal`).
+- **Screen (`screen.go`):** from helper 2026.11.07.2, a browser that may open a terminal may also see and work the machine's screen in the Monitor panel. The helper connects to the VNC server already running on the machine (macOS Screen Sharing, a Linux desktop's own remote desktop, wayvnc, x11vnc, or TightVNC/UltraVNC/TigerVNC on Windows) at `127.0.0.1:5900` (`MON_SCREEN_PORT` for another port; loopback only) and carries its bytes both ways; the page's viewer (noVNC, loaded the first time a screen opens) speaks VNC to that server itself, so the server asks for its own password and the helper sees only bytes. It never starts, configures or bypasses a VNC server. Opening one takes a signed `screen` command from a pinned key, the console switch on, and an allowed browser key (not a portable copy); the relay never carries it. A session is one output stream: VNC cannot resume, so a stream that ends ends the session. At most three at once; a session the page stops beating for three minutes is ended, as is every session when the console is switched off, the signing key is unpinned, or the browser key leaves the allowlist. `MON_SCREEN=off` turns the screen off while leaving the terminal on.
 - **End-to-end encrypted relay console (`econ.go`):** For machines that can only make outbound HTTPS requests and cannot establish a direct tunnel, the browser can seal a command to the machine's X25519 public key (`econ-key`) using `X25519 + HKDF-SHA256 + AES-256-GCM` (with the command ID bound as AAD). The relay transports only ciphertext and cannot decrypt either the command or its sealed output. Requires both `console on` and a pinned signing key.
 
 On Linux, when installed **without** `--console`, the systemd user unit runs under `ProtectSystem=strict` and `ProtectHome=read-only` (with write access limited to `~/.config/subnsub-helper`).
@@ -295,7 +296,7 @@ The install command copied from a signed-in dashboard automatically pins your ac
 Once at least one key is pinned (`sealed` trust state):
 - Every command must carry a valid Ed25519 signature over the canonical signing payload (`mon-cmd-v1` / `mon-cmd-v2`), generated in your browser by a private key that never leaves the browser.
 - Signatures expire 5 minutes from `issued_at`, and command IDs are deduplicated within the freshness window to prevent replay.
-- Shell commands, sealed console commands, tunnel commands, renames, custom tile actions, and portable copy enrollments all require a pinned key.
+- Shell commands, sealed console commands, tunnel commands, terminals, screens, renames, custom tile actions, and portable copy enrollments all require a pinned key.
 
 ### Portable terminal access (`clone`)
 
@@ -576,6 +577,8 @@ Every persistent toggle is stored as a file in `~/.config/subnsub-helper/`; envi
 | `MON_ADAPTERS` | Set `off` to disable signed `adapters.json` hot-updates |
 | `MON_SYNC` | `1` or `0`: override the `sessions-sync` switch |
 | `MON_DIRECT` | `1` or `0`: override the `direct` tunnel switch |
+| `MON_SCREEN` | Set `off` to keep the machine's screen closed while the console is on |
+| `MON_SCREEN_PORT` | The local VNC server's port, on `127.0.0.1` (default `5900`) |
 | `MON_DERPMAP` | Custom HTTPS URL for the tailcat DERP map |
 | `MON_TRANSPORT` | `relay` or `tailcat`: force a single transport mode |
 | `MON_MUSIC` | Set `off` to share no music for this run, whatever `music.json` says |

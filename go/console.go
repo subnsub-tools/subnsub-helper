@@ -678,6 +678,10 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 		// Taken at the tunnel's command door, with its peer (direct.go):
 		// a road that reaches here has no peer to bind a token to.
 		return consoleResult{ID: c.ID, Kind: "files", Target: c.Target, Code: -1, Error: "tunnel-only"}, false
+	case "screen":
+		// A machine's screen (screen.go): opened at the tunnel's command
+		// door, bound to its peer; never carried by the relay.
+		return consoleResult{ID: c.ID, Kind: "screen", Code: -1, Error: "tunnel-only"}, false
 	case "myip":
 		// The page's Exit tile (myip.go): My IP's six questions, asked from
 		// this machine's own way out — or from inside the namespace the

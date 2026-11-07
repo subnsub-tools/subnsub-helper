@@ -128,7 +128,12 @@ beside the relay push when there is a token and alone when there is not;
 MON_TRANSPORT=relay or =tailcat forces one or the other. On a machine that is
 on a Tailscale network the same view also answers on its Tailscale address, to
 a browser on that network whose key is allowed, sealed so the network does not
-have to be trusted; MON_TAILNET=off keeps that port closed.
+have to be trusted; MON_TAILNET=off keeps that port closed. A browser that
+may open a terminal may also see and work this machine's screen: the helper
+connects to the VNC server already running here (127.0.0.1:5900, or the port
+MON_SCREEN_PORT names) and carries its bytes both ways, and that server asks
+for its own password. It never starts or configures one. MON_SCREEN=off turns
+the screen off while leaving the terminal on.
 
 A portable copy is a dashboard's access lent to a command line for a while
 (the Monitor page: a machine's terminal → Create a copy). On the computer that
