@@ -35,6 +35,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -919,10 +920,37 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 				if clone != nil {
 					signer = clone.sign
 				}
-				if tok, why := h.ptys.open(peer, signer, c.Target); why != "" {
+				if tok, sid, why := h.ptys.open(peer, signer, c.Target); why != "" {
 					res.Error = why
 				} else {
-					res = consoleResult{ID: c.ID, Kind: "pty", Code: 0, Out: tok}
+					// The token is the page's; the id is the session's,
+					// for coming back to it (pty-attach) once the token
+					// is gone with the page.
+					res = consoleResult{ID: c.ID, Kind: "pty", Code: 0, Out: tok, Target: sid}
+				}
+			}
+		} else if c.Kind == "pty-attach" {
+			// Back to a session that is running (pty.go): a token for this
+			// peer, the keyboard with it. A portable copy only to the
+			// sessions it opened.
+			releaseCmd()
+			res = consoleResult{ID: c.ID, Kind: "pty-attach", Code: -1, Error: "not-allowed"}
+			if peer, ok := transport.PeerFromContext(r.Context()); ok {
+				var own ed25519.PublicKey
+				signer := commandSigner(c, id, loadTrust())
+				if clone != nil {
+					own, signer = clone.sign, clone.sign
+				}
+				if tok, keys, why := h.ptys.attach(peer, c.Target, own, signer); why != "" {
+					res.Error = why
+				} else {
+					// The id, and "/w" where the keys stayed with
+					// another page.
+					sid := strings.TrimSuffix(c.Target, "/w")
+					if !keys {
+						sid += "/w"
+					}
+					res = consoleResult{ID: c.ID, Kind: "pty-attach", Code: 0, Out: tok, Target: sid}
 				}
 			}
 		} else if c.Kind == "screen" {

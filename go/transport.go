@@ -504,12 +504,14 @@ type Beacon struct {
 	// The console's spare-road key (econ.go): carried here too, so a machine
 	// whose own tunnel is up but whose WATCHER cannot reach it can still use
 	// the sealed relay road.
-	Econ        string `json:"econ,omitempty"`
-	Console     bool   `json:"exec"`
-	Update      bool   `json:"upd"`
-	AutoUpdate  bool   `json:"auto"`
-	Diagnostics bool   `json:"diag"`
-	Signed      bool   `json:"sgn"`
+	Econ string `json:"econ,omitempty"`
+	// The terminal sessions running here (types.go Snapshot.Ptys).
+	Ptys        *[]ptyListed `json:"ptys,omitempty"`
+	Console     bool         `json:"exec"`
+	Update      bool         `json:"upd"`
+	AutoUpdate  bool         `json:"auto"`
+	Diagnostics bool         `json:"diag"`
+	Signed      bool         `json:"sgn"`
 	// Whether a pinned browser may press this machine's tiles (tileaction.go).
 	Act bool `json:"act"`
 	// Whether this machine takes the `myip` command (myip.go).
@@ -565,7 +567,7 @@ func pushBody() any {
 	if addr := directAddress(); addr != "" && beaconMode() {
 		return Beacon{Beacon: true, CapturedAt: snap.CapturedAt, AgentID: snap.AgentID,
 			AgentLabel: snap.AgentLabel, HelperVersion: helperVersion, DirectAddr: addr,
-			Rename: snap.Rename, Econ: snap.Econ,
+			Rename: snap.Rename, Econ: snap.Econ, Ptys: snap.Ptys,
 			Console: snap.Console, Update: snap.Update, AutoUpdate: snap.AutoUpdate, Diagnostics: snap.Diagnostics, Signed: snap.Signed, Act: snap.Act, MyIP: snap.MyIP,
 			Spaces: snap.Spaces, Wiped: snap.Wiped, Outages: snap.Outages, OutagesSince: snap.OutagesSince, Reach: snap.Reach,
 			Hist:       historyCoarseClosed(beaconHistRows),

@@ -95,6 +95,12 @@ type pushHint struct {
 	OutagesUntil *float64 `json:"outages_until"`
 	// The same for the reach record (reach.go reachAcked).
 	ReachUntil *float64 `json:"reach_until"`
+	// How long, in seconds, a terminal session outlives its last page: the
+	// account's allowance (pty.go). Bounded there, to between ptyQuietMax
+	// and ptyKeepMax, so the most a relay can do with it is keep a shell
+	// somebody opened here running for a week — never open one, never read
+	// one, never past the ceiling its opener signed.
+	PtyKeep *float64 `json:"pty_keep"`
 }
 
 // Where the push loop files what the relay said and the console loop asks.
@@ -146,6 +152,9 @@ func (b *hintBox) absorb(raw []byte) {
 	// The outage record's acknowledgement, read on every machine too.
 	outageAcked(parsed, h.OutagesUntil)
 	reachAcked(parsed, h.ReachUntil)
+	if parsed && h.PtyKeep != nil && *h.PtyKeep > 0 && *h.PtyKeep < 1e9 {
+		go ptySessions.setKeep(time.Duration(*h.PtyKeep) * time.Second)
+	}
 	if parsed && h.Update != nil && *h.Update {
 		nudgeUpdate()
 	}

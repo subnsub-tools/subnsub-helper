@@ -595,7 +595,7 @@ func verifyCloneCommand(c consoleCmd, agent string, a activeClone, now time.Time
 	switch c.Kind {
 	case "", "sh":
 		want = "sh"
-	case "pty":
+	case "pty", "pty-attach":
 		want = "pty"
 	}
 	if want == "" || !a.can(want) {

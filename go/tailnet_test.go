@@ -416,7 +416,7 @@ func TestTailnetPtyRoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := ts.handler.Load().ptys
-	tok, why := hub.open(nk, nil, "80x24")
+	tok, _, why := hub.open(nk, nil, "80x24")
 	if why != "" {
 		t.Fatalf("no terminal: %s", why)
 	}

@@ -283,6 +283,10 @@ type Snapshot struct {
 	// The console's spare road, where this machine opened it: its own
 	// X25519 key in text, for the dashboard to seal a line to (econ.go).
 	Econ string `json:"econ,omitempty"`
+	// The terminal sessions running here (pty.go): ids, never tokens.
+	// Absent where the machine offers no terminal; a list, empty or not,
+	// where it does — which is how a page knows they outlive it.
+	Ptys *[]ptyListed `json:"ptys,omitempty"`
 	// Machine health. A pointer so a platform that can measure nothing at all
 	// omits the key rather than shipping a shell of nulls — see system.go for
 	// what each platform can actually read, and why.
@@ -496,7 +500,7 @@ func collectAllOpts(consumeSeries bool) Snapshot {
 		HelperVersion: helperVersion, Console: consoleEnabled(), Update: updateAllowed(), AutoUpdate: autoUpdateEnabled(),
 		AdaptersVersion: adaptersVersion(),
 		Diagnostics:     diagnosticsEnabled(), Signed: loadTrust().sealed, Act: tileActionsOn(), MyIP: myipAvailable(),
-		DirectAddr: directAddress(), Econ: econPublic(), Wiped: outageLastWipe(),
+		DirectAddr: directAddress(), Econ: econPublic(), Ptys: ptyPushList(), Wiped: outageLastWipe(),
 		Outages: outagePending(time.Now()), OutagesSince: outageSince(), Reach: reachPending(time.Now())}
 	// Concurrently, holding the registry's order for the output. Serial was
 	// fine at four collectors; at eight, five of them making real requests

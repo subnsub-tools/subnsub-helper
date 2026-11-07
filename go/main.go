@@ -175,6 +175,10 @@ func main() {
 	}
 
 	switch args[0] {
+	case "pty-hold":
+		// A terminal session's holder (ptyhold_unix.go): started by the
+		// helper itself, never typed.
+		os.Exit(runPtyHold(args[1:]))
 	case "watch":
 		every := 30.0
 		if len(args) > 1 {

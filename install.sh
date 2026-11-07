@@ -206,6 +206,11 @@ pid_is() {
 # the sweep stays and the regex does not. /proc is read directly and argv[0] is
 # compared for EQUALITY, which cannot over-match by construction. Processes
 # belonging to other users simply fail the kill, as they should.
+#
+# Not the terminal sessions' holders (`<bin> pty-hold ...`, go/ptyhold_unix.go):
+# they are the same binary, started on purpose outside the service so that a
+# reinstall or an update leaves the shells running. Uninstall ends them by
+# removing their sockets (see uninstall_one).
 helper_stop_strays() {
     _sbin="${INSTALLED_BIN:-${BINDIR:-$HOME/.local/bin}/$NAME}"
     [ -d /proc ] || return 0
@@ -215,6 +220,8 @@ helper_stop_strays() {
         [ -r "$_proc/cmdline" ] || continue
         _argv0=$(tr '\0' '\n' < "$_proc/cmdline" 2>/dev/null | head -n 1)
         [ "$_argv0" = "$_sbin" ] || continue
+        _argv1=$(tr '\0' '\n' < "$_proc/cmdline" 2>/dev/null | sed -n 2p)
+        [ "$_argv1" = "pty-hold" ] && continue
         kill "$_spid" 2>/dev/null || true
     done
 }
@@ -395,7 +402,12 @@ uninstall_one() {
           "$HOME/.config/$NAME/clones" "$HOME/.config/$NAME/clones.new" \
           "$HOME/.config/$NAME/clone-access" "$HOME/.config/$NAME/clone-access.new" \
           "$HOME/.config/$NAME/pairing" "$HOME/.config/$NAME/pairing.new" \
-          "$HOME/.config/$NAME/update-github-down"
+          "$HOME/.config/$NAME/update-github-down" \
+          "$HOME/.config/$NAME/pty-keep"
+    # The terminal sessions' sockets. Each holder looks for its own every few
+    # seconds and, finding it gone, hangs up on its shell and exits — on every
+    # system, with or without /proc, whatever supervised the helper.
+    rm -rf "$HOME/.config/$NAME/pty"
     # The binary the last self-update moved aside. Left behind it would be an
     # unreferenced few megabytes under a name nothing else will ever clean up.
     rm -f "${INSTALLED_BIN:-$BINDIR/$NAME}.prev"

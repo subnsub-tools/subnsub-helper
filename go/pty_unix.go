@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -109,7 +110,16 @@ func ptyStart(cols, rows int) (tty *os.File, kill func(), wait func(), err error
 		return nil, nil, nil, err
 	}
 	pid := cmd.Process.Pid
+	// Closed once the last signal has gone out, so whoever waits for the
+	// shell (a holder about to exit) waits for that too: a job that
+	// ignores the hangup is not left running because the process meant to
+	// finish it off was gone first.
+	swept := make(chan struct{})
+	var killed atomic.Bool
 	kill = func() {
+		if !killed.CompareAndSwap(false, true) {
+			return
+		}
 		// The shell leads a session of its own (its pid is the session's
 		// id), and a job-control shell gives every job a process group of
 		// its own inside it — so the shell's group alone is not "what it
@@ -136,9 +146,15 @@ func ptyStart(cols, rows int) (tty *os.File, kill func(), wait func(), err error
 			for _, p := range sessionMembers(pid) {
 				syscall.Kill(p, syscall.SIGKILL)
 			}
+			close(swept)
 		}()
 	}
-	wait = func() { cmd.Wait() }
+	wait = func() {
+		cmd.Wait()
+		if killed.Load() {
+			<-swept
+		}
+	}
 	return tty, kill, wait, nil
 }
 
