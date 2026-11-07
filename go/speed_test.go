@@ -269,6 +269,10 @@ func TestSpeedPeerRun(t *testing.T) {
 	if v.St != "done" || v.Down <= 0 || v.Up <= 0 || v.Ping <= 0 || v.Road != "tailcat" || v.Route != "direct" {
 		t.Fatalf("finished: %+v", v)
 	}
+	// The round trips: idle, and read while each way ran full.
+	if v.DlLat <= 0 || v.UlLat <= 0 || len(v.Rtts) != speedPings-speedPingsSkip || len(v.DlRtts) == 0 || len(v.UlRtts) == 0 {
+		t.Fatalf("round trips: %+v", v)
+	}
 	if dialled.Agent != agentID() || dialled.Addr != "tcTESTADDRESSFORAGRANT00" {
 		t.Fatalf("dialled %+v", dialled)
 	}
@@ -499,7 +503,7 @@ func TestSpeedNetRun(t *testing.T) {
 	if v.St != "done" || !v.Net || v.Colo != "SJC" || v.Cc != "US" || v.Down <= 0 || v.Up <= 0 || v.Ping <= 0 {
 		t.Fatalf("finished: %+v", v)
 	}
-	if v.DlLat <= 0 || v.UlLat <= 0 {
+	if v.DlLat <= 0 || v.UlLat <= 0 || len(v.Rtts) == 0 || len(v.DlRtts) == 0 || len(v.UlRtts) == 0 {
 		t.Fatalf("no round trip under load: %+v", v)
 	}
 	if v.TCP == nil || v.TCP.Rtt != 1200 || v.TCP.Min != 900 || v.TCP.Retrans != 2 || v.TCP.Sent != 40 {

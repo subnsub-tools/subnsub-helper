@@ -151,7 +151,7 @@ func (j *speedJob) workNet(ctx context.Context) (string, string) {
 		return "err", "net-unreachable"
 	}
 	p, jit := speedLatency(rtts)
-	j.set(func(j *speedJob) { j.ping, j.jit = p, jit })
+	j.set(func(j *speedJob) { j.ping, j.jit, j.rtts = p, jit, rtts })
 
 	// Down, then up, each with its round trip under load.
 	dur := time.Duration(secs) * speedSecond
@@ -165,7 +165,7 @@ func (j *speedJob) workNet(ctx context.Context) (string, string) {
 		return "err", code
 	}
 	dl, dj := speedLatency(lat)
-	j.set(func(j *speedJob) { j.down, j.live, j.dlLat, j.dlJit = down, 0, dl, dj })
+	j.set(func(j *speedJob) { j.down, j.live, j.dlLat, j.dlJit, j.dlRtts = down, 0, dl, dj, lat })
 	if code := j.still(ctx); code != "" {
 		return "err", code
 	}
@@ -178,7 +178,7 @@ func (j *speedJob) workNet(ctx context.Context) (string, string) {
 		return "err", code
 	}
 	ul, uj := speedLatency(lat)
-	j.set(func(j *speedJob) { j.up, j.ulLat, j.ulJit = up, ul, uj })
+	j.set(func(j *speedJob) { j.up, j.ulLat, j.ulJit, j.ulRtts = up, ul, uj, lat })
 
 	// The connection the last pieces went on, as Cloudflare's end saw it:
 	// a nicety, a run is not lost for want of it.
@@ -188,37 +188,18 @@ func (j *speedJob) workNet(ctx context.Context) (string, string) {
 	return "done", ""
 }
 
-// measureNet is measure, with the round trip read on pc every so often
-// while the streams run (from the first second on, as the rate is).
+// measureNet is measureLoaded with the round trip read on pc, its own
+// connection to Cloudflare.
 func (j *speedJob) measureNet(ctx context.Context, pc *http.Client, dur time.Duration, stream func(context.Context, time.Time, *speedMeter) string) (float64, []float64, string) {
-	lctx, stop := context.WithCancel(ctx)
-	warm := time.Now().Add(speedSecond)
-	got := make(chan []float64, 1)
-	go func() { got <- speedNetLoaded(lctx, pc, warm) }()
-	rate, code := j.measure(ctx, dur, stream)
-	stop()
-	lat := <-got
+	ping := func(c context.Context) (float64, bool) {
+		ms, _, code := speedNetPing(c, pc)
+		return ms, code == ""
+	}
+	rate, lat, code := j.measureLoaded(ctx, ping, 0, dur, stream)
 	if code == "unreachable" {
 		code = "net-unreachable"
 	}
 	return rate, lat, code
-}
-
-// speedNetLoaded reads the round trip every 0.4 s while a direction is
-// under load.
-func speedNetLoaded(ctx context.Context, pc *http.Client, warm time.Time) []float64 {
-	var out []float64
-	for {
-		select {
-		case <-ctx.Done():
-			return out
-		case <-time.After(speedSecond * 2 / 5):
-		}
-		ms, _, code := speedNetPing(ctx, pc)
-		if code == "" && ctx.Err() == nil && !time.Now().Before(warm) {
-			out = append(out, ms)
-		}
-	}
 }
 
 // speedNetTrace is the edge that answers and the country it puts this

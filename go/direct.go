@@ -600,6 +600,9 @@ func newDirectHandler() *directHandler {
 	h.mux.HandleFunc("/v1/speed/ping", h.speed)
 	h.mux.HandleFunc("/v1/speed/down", h.speed)
 	h.mux.HandleFunc("/v1/speed/up", h.speed)
+	// What this machine's Tailscale knows of its network (tsview.go): reads
+	// only, for an allowlisted key.
+	h.mux.HandleFunc("/v1/tailnet", h.tailnetView)
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusNotFound, "unknown-frame")
 	})
@@ -773,6 +776,9 @@ func directCapsFor(r *http.Request) []string {
 				// The Speed tab's end of a measurement (speed.go): to every
 				// browser on the list, whatever the switches.
 				caps = append(caps, transport.CapSpeed)
+				// The map of who reaches whom on its tailnet (tsview.go):
+				// read-only, whatever the switches.
+				caps = append(caps, transport.CapTailnetMap)
 				if music {
 					caps = append(caps, transport.CapMusic)
 				}

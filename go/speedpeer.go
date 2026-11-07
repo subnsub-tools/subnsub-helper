@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -110,18 +111,22 @@ type speedJob struct {
 	at     time.Time
 	end    time.Time
 	cancel context.CancelFunc
+	// The round trip under load each way, and the round trips themselves:
+	// the idle ones, and those read while each direction ran full.
+	dlLat  float64
+	dlJit  float64
+	ulLat  float64
+	ulJit  float64
+	rtts   []float64
+	dlRtts []float64
+	ulRtts []float64
 	// A measurement to the internet (speednet.go): no key, no grant, no
 	// other machine; the edge that answered, the country it puts this
-	// machine in, the round trip under load each way, and the TCP
-	// connection as Cloudflare's end saw it.
-	net   bool
-	colo  string
-	cc    string
-	dlLat float64
-	dlJit float64
-	ulLat float64
-	ulJit float64
-	tcp   *speedTCP
+	// machine in, and the TCP connection as Cloudflare's end saw it.
+	net  bool
+	colo string
+	cc   string
+	tcp  *speedTCP
 }
 
 // speedView is a measurement as speed-status tells it.
@@ -139,15 +144,21 @@ type speedView struct {
 	Secs  int     `json:"secs"`
 	T     int64   `json:"t"` // ms into the phase
 	At    int64   `json:"at"`
+	// The round trip under load each way (both kinds since 2026.11.07; to
+	// the internet before), and the round trips in milliseconds, a tenth at
+	// most: idle, and while each direction ran full.
+	DlLat  float64   `json:"dlLat,omitempty"`
+	DlJit  float64   `json:"dlJit,omitempty"`
+	UlLat  float64   `json:"ulLat,omitempty"`
+	UlJit  float64   `json:"ulJit,omitempty"`
+	Rtts   []float64 `json:"rtts,omitempty"`
+	DlRtts []float64 `json:"dlRtts,omitempty"`
+	UlRtts []float64 `json:"ulRtts,omitempty"`
 	// speed-net's alone.
-	Net   bool      `json:"net,omitempty"`
-	Colo  string    `json:"colo,omitempty"`
-	Cc    string    `json:"cc,omitempty"`
-	DlLat float64   `json:"dlLat,omitempty"`
-	DlJit float64   `json:"dlJit,omitempty"`
-	UlLat float64   `json:"ulLat,omitempty"`
-	UlJit float64   `json:"ulJit,omitempty"`
-	TCP   *speedTCP `json:"tcp,omitempty"`
+	Net  bool      `json:"net,omitempty"`
+	Colo string    `json:"colo,omitempty"`
+	Cc   string    `json:"cc,omitempty"`
+	TCP  *speedTCP `json:"tcp,omitempty"`
 }
 
 var speedJobs = struct {
@@ -195,7 +206,8 @@ func (j *speedJob) view() speedView {
 	defer j.mu.Unlock()
 	v := speedView{Job: j.job, St: j.st, Err: j.err, Road: j.road, Route: j.route, Ping: j.ping, Jit: j.jit,
 		Down: j.down, Up: j.up, Secs: j.secs, At: j.at.Unix(),
-		Net: j.net, Colo: j.colo, Cc: j.cc, DlLat: j.dlLat, DlJit: j.dlJit, UlLat: j.ulLat, UlJit: j.ulJit, TCP: j.tcp}
+		Net: j.net, Colo: j.colo, Cc: j.cc, DlLat: j.dlLat, DlJit: j.dlJit, UlLat: j.ulLat, UlJit: j.ulJit, TCP: j.tcp,
+		Rtts: speedTenths(j.rtts), DlRtts: speedTenths(j.dlRtts), UlRtts: speedTenths(j.ulRtts)}
 	if j.st == "down" || j.st == "up" {
 		v.Live = j.live
 	}
@@ -461,12 +473,19 @@ func (j *speedJob) work(ctx context.Context) (string, string) {
 		}
 	}
 	p, jit := speedLatency(rtts)
-	j.set(func(j *speedJob) { j.ping, j.jit = p, jit })
+	j.set(func(j *speedJob) { j.ping, j.jit, j.rtts = p, jit, rtts })
 
-	// Down, then up.
+	// Down, then up, each with the round trip read while it runs full: on
+	// the same road, so what the bytes queue behind, a ping queues behind
+	// too. The first is let go, as it may be the one that opens a
+	// connection of its own.
+	pingA := func(c context.Context) (float64, bool) {
+		ms, code := speedPingOnce(c, hc)
+		return ms, code == ""
+	}
 	dur := time.Duration(secs) * speedSecond
 	j.set(func(j *speedJob) { j.st, j.phase = "down", time.Now() })
-	down, code := j.measure(ctx, dur, func(c context.Context, stop time.Time, m *speedMeter) string {
+	down, lat, code := j.measureLoaded(ctx, pingA, 1, dur, func(c context.Context, stop time.Time, m *speedMeter) string {
 		c, cancel := context.WithDeadline(c, stop)
 		defer cancel()
 		return speedDownStream(c, hc, m)
@@ -474,7 +493,8 @@ func (j *speedJob) work(ctx context.Context) (string, string) {
 	if code != "" {
 		return "err", code
 	}
-	j.set(func(j *speedJob) { j.down, j.live = down, 0 })
+	dl, dj := speedLatency(lat)
+	j.set(func(j *speedJob) { j.down, j.live, j.dlLat, j.dlJit, j.dlRtts = down, 0, dl, dj, lat })
 	if road == "tailcat" {
 		routeOf()
 	}
@@ -489,13 +509,14 @@ func (j *speedJob) work(ctx context.Context) (string, string) {
 	}
 	rtt := time.Duration(p * float64(time.Millisecond))
 	j.set(func(j *speedJob) { j.st, j.phase = "up", time.Now() })
-	up, code := j.measure(ctx, dur, func(c context.Context, stop time.Time, m *speedMeter) string {
+	up, lat, code := j.measureLoaded(ctx, pingA, 1, dur, func(c context.Context, stop time.Time, m *speedMeter) string {
 		return speedUpStream(c, stop, hc, m, piece, rtt)
 	})
 	if code != "" {
 		return "err", code
 	}
-	j.set(func(j *speedJob) { j.up = up })
+	ul, uj := speedLatency(lat)
+	j.set(func(j *speedJob) { j.up, j.ulLat, j.ulJit, j.ulRtts = up, ul, uj, lat })
 	if road == "tailcat" {
 		routeOf()
 	}
@@ -703,6 +724,60 @@ func speedLatency(ms []float64) (float64, float64) {
 	}
 	return mid, jit
 }
+
+// measureLoaded is measure, with the round trip read by ping every so often
+// while the streams run (from the first second on, as the rate is), the
+// first skip of those left out.
+func (j *speedJob) measureLoaded(ctx context.Context, ping func(context.Context) (float64, bool), skip int, dur time.Duration, stream func(context.Context, time.Time, *speedMeter) string) (float64, []float64, string) {
+	lctx, stop := context.WithCancel(ctx)
+	warm := time.Now().Add(speedSecond)
+	got := make(chan []float64, 1)
+	go func() { got <- speedLoaded(lctx, ping, warm, skip) }()
+	rate, code := j.measure(ctx, dur, stream)
+	stop()
+	return rate, <-got, code
+}
+
+// speedLoaded reads the round trip every 0.4 s until ctx ends, keeping
+// those after warm but the first skip.
+func speedLoaded(ctx context.Context, ping func(context.Context) (float64, bool), warm time.Time, skip int) []float64 {
+	var out []float64
+	for {
+		select {
+		case <-ctx.Done():
+			return out
+		case <-time.After(speedSecond * 2 / 5):
+		}
+		ms, ok := ping(ctx)
+		if !ok || ctx.Err() != nil || time.Now().Before(warm) {
+			continue
+		}
+		if skip > 0 {
+			skip--
+			continue
+		}
+		out = append(out, ms)
+	}
+}
+
+// speedTenths is ms to a tenth, at most speedKeepRtts of them: what the
+// page draws a measurement's round trips from.
+func speedTenths(ms []float64) []float64 {
+	if len(ms) == 0 {
+		return nil
+	}
+	if len(ms) > speedKeepRtts {
+		ms = ms[len(ms)-speedKeepRtts:]
+	}
+	out := make([]float64, len(ms))
+	for i, v := range ms {
+		out[i] = math.Round(v*10) / 10
+	}
+	return out
+}
+
+// speedKeepRtts is the most round trips of one kind a status carries.
+const speedKeepRtts = 64
 
 // speedBusyWait is how long a stream waits when A has no stream to spare:
 // the ones the last direction left behind are still noticing they were hung

@@ -82,6 +82,11 @@ const (
 	// the relay. The audio itself is not framed: /v1/music/file answers with
 	// the file's own bytes.
 	TypeMusic = "music"
+	// TypeTailnet is what the machine's own Tailscale knows of its network
+	// (tsview.go): the devices, and the access rules the control plane sent
+	// this machine. Served on request over the direct roads only, never
+	// streamed and never sent to the relay.
+	TypeTailnet = "tailnet"
 )
 
 // Limits are the byte ceilings per frame type, applied to the SERIALISED
@@ -99,7 +104,8 @@ var Limits = map[string]int{
 	TypePair:     4 << 10,
 	// Under the browser module's 1 MiB answer ceiling (tailcat-web
 	// maxGetBody), envelope included.
-	TypeMusic: 960 << 10,
+	TypeMusic:   960 << 10,
+	TypeTailnet: 960 << 10,
 }
 
 // Capabilities a peer may announce or be granted. Each one is authorised on
@@ -169,6 +175,10 @@ const (
 	// against Cloudflare's speed test (helper speednet.go) — where the
 	// console is on, as speed-peer is.
 	CapSpeedNet = "speed-net"
+	// CapTailnetMap: the machine reports what its Tailscale knows of the
+	// network, devices and access rules (helper tsview.go), for the map of
+	// who reaches whom. Named to an allowlisted browser; read-only.
+	CapTailnetMap = "tailnet-map"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on
