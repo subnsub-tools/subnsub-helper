@@ -575,7 +575,7 @@ func tailnetInnerOK(p string) bool {
 		"/v1/music", "/v1/music/index", "/v1/music/file", "/v1/music/art",
 		"/v1/files/search", "/v1/files/file", "/v1/files/put",
 		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done",
-		"/v1/tailnet":
+		"/v1/tailnet", "/v1/tsping":
 		return true
 	}
 	// The Speed tab's end of a measurement (speed.go).

@@ -26,6 +26,11 @@ type tsFake struct {
 	statusCode int
 	rulesCode  int
 	asked      []string
+	// tsping.go's: the ping's answer, the status it refuses with, and the
+	// queries it was asked.
+	ping     any
+	pingCode int
+	pingQ    []string
 }
 
 func (f *tsFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +53,18 @@ func (f *tsFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		json.NewEncoder(w).Encode(f.rules)
+	case "/localapi/v0/ping":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		f.pingQ = append(f.pingQ, r.URL.RawQuery)
+		if f.pingCode != 0 {
+			w.WriteHeader(f.pingCode)
+			fmt.Fprint(w, `{"error":"timeout waiting for ping"}`)
+			return
+		}
+		json.NewEncoder(w).Encode(f.ping)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}

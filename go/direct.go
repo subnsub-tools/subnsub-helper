@@ -611,6 +611,9 @@ func newDirectHandler() *directHandler {
 	// What this machine's Tailscale knows of its network (tsview.go): reads
 	// only, for an allowlisted key.
 	h.mux.HandleFunc("/v1/tailnet", h.tailnetView)
+	// The way the browser's machine and this one reach each other on the
+	// tailnet, and the round trip (tsping.go): the tailnet road alone.
+	h.mux.HandleFunc("/v1/tsping", h.tailnetPing)
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		h.refuse(w, http.StatusNotFound, "unknown-frame")
 	})
