@@ -423,6 +423,7 @@ func runDirect(ctx context.Context) {
 	startIPv4()
 	go runTailnet(ctx)
 	musicStart()
+	photosStart()
 	// Copies from another computer that were under way when this helper
 	// last stopped (filesfetch.go).
 	fetchResume()
@@ -596,6 +597,10 @@ func newDirectHandler() *directHandler {
 	h.mux.HandleFunc("/v1/music/index", h.musicIndex)
 	h.mux.HandleFunc("/v1/music/file", h.musicFile)
 	h.mux.HandleFunc("/v1/music/art", h.musicArt)
+	// The pictures in the folders chosen (photos.go): reads only, as music.
+	h.mux.HandleFunc("/v1/photos", h.photosStatus)
+	h.mux.HandleFunc("/v1/photos/index", h.photosIndex)
+	h.mux.HandleFunc("/v1/photos/thumb", h.photosThumb)
 	// The Files tab (files.go): a search's hits and an opened file's pieces,
 	// by the token a signed command gave this peer.
 	h.mux.HandleFunc("/v1/files/search", h.filesSearch)
@@ -781,7 +786,7 @@ func directCaps() []string {
 // music is read by the browsers on the allowlist, not by a portable copy.
 func directCapsFor(r *http.Request) []string {
 	caps := directCaps()
-	music, files := musicOn(), filesOn()
+	music, photos, files := musicOn(), photosOn(), filesOn()
 	if k, ok := transport.PeerFromContext(r.Context()); ok {
 		for _, a := range loadAllowedClients() {
 			if a == k {
@@ -799,6 +804,9 @@ func directCapsFor(r *http.Request) []string {
 				}
 				if music {
 					caps = append(caps, transport.CapMusic)
+				}
+				if photos {
+					caps = append(caps, transport.CapPhotos)
 				}
 				// The Files tab's look at the disks (files.go) and its
 				// changes to them (fileswrite.go): the console's grant, to

@@ -54,6 +54,8 @@ const usage = `subnsub-helper — AI coding quota for machines you can't reach
   subnsub-helper address                print this machine's direct address and node key
   subnsub-helper music [on|off|add|...] show or set the music this machine shares with the browsers
                                          on its direct allowlist (tailnet and tailcat only)
+  subnsub-helper photos [on|off|add|...] show or set the folders whose pictures the Photos tab
+                                         shows (tailnet and tailcat only)
   subnsub-helper clone [use|forget]     show, save, or delete a portable terminal access copy
   subnsub-helper run MACHINE -- CMD     run a command on a machine using a portable copy
   subnsub-helper shell MACHINE          open an interactive terminal on a machine using a portable copy
@@ -153,6 +155,12 @@ No folder is shared, and none is read, until one is chosen: 'music add <dir>'
 here or the page; there is no default. The browsers on the direct allowlist
 play it over the tailnet road or the tailcat tunnel, never the relay.
 'music off' here wins over the console.
+
+photos go the same way: OFF until 'photos on' or the console is on with a
+pinned key, and no folder is read until one is chosen ('photos add <dir>' here
+or the Photos page). This machine reads when and where each picture was taken
+and makes the small copies the page shows; the pictures stay where they are.
+'photos off' here wins over the console.
 
 sessions sync is OFF until you turn it on here, and it is the one switch that
 sends something OUT rather than answering a question: with it on, this machine's
@@ -600,6 +608,8 @@ func main() {
 
 	case "music":
 		os.Exit(runMusicCLI(args[1:]))
+	case "photos":
+		os.Exit(runPhotosCLI(args[1:]))
 
 	case "probes":
 		os.Exit(runProbesCLI(args[1:]))

@@ -82,6 +82,11 @@ const (
 	// the relay. The audio itself is not framed: /v1/music/file answers with
 	// the file's own bytes.
 	TypeMusic = "music"
+	// TypePhotos is the pictures in the folders chosen on the machine
+	// (photos.go): which folders and, a page at a time, the pictures in one.
+	// Served on request over the direct roads only, as music is. The small
+	// copies are not framed: /v1/photos/thumb answers with a JPEG.
+	TypePhotos = "photos"
 	// TypeTailnet is what the machine's own Tailscale knows of its network
 	// (tsview.go): the devices, and the access rules the control plane sent
 	// this machine. Served on request over the direct roads only, never
@@ -105,6 +110,7 @@ var Limits = map[string]int{
 	// Under the browser module's 1 MiB answer ceiling (tailcat-web
 	// maxGetBody), envelope included.
 	TypeMusic:   960 << 10,
+	TypePhotos:  960 << 10,
 	TypeTailnet: 960 << 10,
 }
 
@@ -145,6 +151,10 @@ const (
 	// named on the machine, and WebDAV folders a pinned dashboard added —
 	// with the browsers on its allowlist, over the direct roads alone.
 	CapMusic = "music"
+	// CapPhotos: the machine shows the pictures in folders chosen on it
+	// (photos.go) to the browsers on its allowlist, over the direct roads
+	// alone — under the same switches and grant as music.
+	CapPhotos = "photos"
 	// CapFiles: the Files tab may look through this machine's disks and read
 	// its files (files.go) — named to an allowlisted browser where the
 	// console is on, since a console already grants as much.

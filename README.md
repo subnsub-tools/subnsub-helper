@@ -24,6 +24,7 @@ This repository contains the Go helper (`go/`), the installation scripts (`insta
 - [Direct mode](#direct-mode)
   - [Tailnet road](#tailnet-road)
   - [Music](#music)
+  - [Photos](#photos)
   - [Files](#files)
   - [Speed](#speed)
   - [Pairing](#pairing)
@@ -141,7 +142,7 @@ From helper 2026.11.03.1, a machine in direct mode that is on a Tailscale networ
 
 - **Found without the CLI:** the address comes from the machine's interfaces and the name from Tailscale's resolver at `100.100.100.100` (`tailnet.go`). Nothing listens while Tailscale is down or no browser key is allowed. `MON_TAILNET=off` keeps the port closed.
 - **The network is not trusted:** anything on the tailnet can reach the port. A browser takes the machine's X25519 key from a hello that came through the tunnel, its own key must be on `allowed-clients`, and a session is derived from both plus a fresh key on each side (HKDF-SHA256). Every request and answer is AES-256-GCM to that session, numbered so none can be replayed, cut short or moved. A struck key is refused on its next request.
-- **What it carries:** the same read-only view, commands, terminals, screens, music and files as the tunnel.
+- **What it carries:** the same read-only view, commands, terminals, screens, music, photos and files as the tunnel.
 - **Browsers:** Chrome, which can reach a local network address from an https page once the user allows local network access. Other browsers stay on the tunnel. See [the Monitor docs](https://tools.subnsub.com/monitor-docs) for the API.
 
 ### Music
@@ -153,6 +154,15 @@ From helper 2026.11.04.1, a machine in direct mode can share the music on it wit
 - **Only what the walk indexed:** a folder is walked for audio files (MP3, AAC/M4A, FLAC, Ogg/Opus, WAV, AIFF, WebM, CAF), at most 16 folders per machine, 100,000 tracks per folder and 24 levels deep. A request names a track by its path in that folder's index and is answered only if the index holds it; local reads go through `os.Root`, which refuses any path that leaves the folder. Tags, durations and covers are read on the machine (`musictags.go`); covers are scaled there (128, 256, 512 or 1024 px).
 - **What travels:** `GET /v1/music` (the folders, their track counts and revisions), `/v1/music/index` (one page of a folder's tracks), `/v1/music/file` (a range of a track's bytes, at most 4 MiB per request) and `/v1/music/art` (a scaled cover), all over the tunnel or the tailnet road, sealed as everything else there is.
 - **WebDAV:** a WebDAV folder (a NAS, Nextcloud) is listed with `PROPFIND` and read by range by the helper itself (`musicdav.go`). A browser whose signing key the machine has pinned may add one, look through any folder again, or stop sharing one, by a signed `music` command over the tunnel; unless the console is on, it cannot look through or name a local folder, which is then added only at the machine. The account and password are kept in `music.json` (mode `0600`) on the machine and nowhere else. A server whose certificate the system does not trust is refused until its SHA-256 fingerprint is pinned (`cert-untrusted` carries the fingerprint for the page to show); a changed certificate is refused as `cert-changed`.
+
+### Photos
+
+From helper 2026.11.10.1, a machine in direct mode can show the pictures in folders chosen on it to the browsers on its `allowed-clients` list; the Monitor page's Photos tab lays every machine's pictures on one timeline by the day they were taken (`photos.go`). Like music it travels only over the tunnel or the tailnet road: no photos route is reachable from the relay's mailbox, and the `photos` command kind is refused there (`tunnel-only`). The hello reports `photos`.
+
+- **Switched on as music is:** `subnsub-helper photos on`, `photos add FOLDER`, `photos remove ID|FOLDER`, `photos rescan`, `photos off`, and `photos` to list what is shown; `MON_PHOTOS=off` keeps it off for a run. A machine whose console is on and which has pinned a dashboard key has photos on without `photos on`, and that dashboard may look through the machine's folders and choose one by signed `browse` and `add` commands over the tunnel; elsewhere a pinned dashboard may only `remove` a folder or `rescan`. Nothing on the disk is read until a folder is chosen. A listing gives one folder's own pictures and, for each folder in it, how many pictures are under it, counted for at most 3 seconds and 60,000 entries for the whole listing, on the folder's own disk and never through a link; what the count did not reach is reported as not counted, never as empty. The places to begin from (Pictures, Desktop, home, Downloads, mounted disks) are named and never counted, and macOS permission waits are answered `permission-wait` as for music. A folder inside one already shown is refused as `already-shared`, one around shown folders takes their place, and the home folder itself, `/` and the system's folders are refused as `too-broad`. `photos off` at the machine wins over the console.
+- **The index:** each folder is walked (at most 16 folders per machine, 200,000 pictures per folder, 24 levels deep, and again every 30 minutes) for JPEG, PNG, GIF, WebP, HEIC/HEIF, AVIF and TIFF files of at least 2 KiB and 160 px on the long side. From the first bytes of each the helper reads its size, orientation, when it was taken (with the time zone where the camera wrote one), the camera, and where it was taken where its EXIF has GPS (`photosmeta.go`); the file's own time stands in where there is no date. The index is kept in `photos-index.json`.
+- **What travels:** `GET /v1/photos` (the folders, their counts and revisions, whether a walk is running), `/v1/photos/index` (one page of a folder's pictures) and `/v1/photos/thumb` (a JPEG 640 or 320 px on its long side, upright). A small copy is answered only for a picture in its folder's index, read through `os.Root`. JPEG, PNG and GIF are decoded by the helper (at most 96 MiB and 52 megapixels; beyond that the camera's own embedded thumbnail, size-checked first, where there is one); on macOS `sips` makes the copies of HEIC, AVIF, WebP and TIFF, which elsewhere have none (`photosthumb.go`). Copies are kept in memory (32 MiB) and under the user cache folder (`subnsub-helper/photos`, at most 512 MiB), and are deleted with their folder.
+- **Nothing here writes:** opening the originals, exporting and organizing (move, rename, the trash) are the Files commands (see [Files](#files)), so they need the console; a machine with photos switched on without it shows the small copies only. Resized or converted exports, watermarks and the removal of location and camera data are made in the browser, from the original.
 
 ### Files
 
@@ -208,6 +218,7 @@ For collectors that invoke a local CLI (`codex`, `amp`, `kiro-cli`, `agy`), the 
 - **Sanitized error reporting:** Because collector error codes are included in snapshots, raw HTTP library errors, URLs, and headers are never interpolated into published output. All failures map to a closed vocabulary of error and detail codes (`go/detail.go`).
 - **No intrusive host access:** The helper never reads browser cookies, shell history, SSH keys, or arbitrary environment variables, and never requests macOS Full Disk Access.
 - **Music only when shared:** nothing on the disk is read until a person chooses a folder, at the machine or (with the console on and a dashboard key pinned, which already grants every file this account can read) on the page; then only the audio files and covers in the shared folders, and only for the browsers on the direct allowlist, over the tunnel or the tailnet road, never through the relay (see [Music](#music)).
+- **Photos only when chosen:** the same for pictures: nothing is read until a folder is chosen, then only the pictures in it, their metadata and small copies made on the machine, for the same browsers over the same roads; the originals only through the Files commands, under the console (see [Photos](#photos)).
 - **Quota request pacing:** Remote vendor APIs are queried on demand when you click refresh (or at most once every 10 minutes while actively watching a machine configured for automatic refresh), preventing background rate-limit exhaustion (`go/pace.go`).
 
 **What is included in a snapshot (`go/types.go`):**
@@ -553,6 +564,10 @@ subnsub-helper music add FOLDER       Share a local folder (at the machine, or f
 subnsub-helper music add-webdav URL   Share a WebDAV folder (--user NAME; password from MON_WEBDAV_PASSWORD)
 subnsub-helper music remove ID        Stop sharing a folder, named by its ID, its path or its URL
 subnsub-helper music rescan           Have the running helper walk every shared folder again
+subnsub-helper photos [on|off]        List the folders whose pictures the Photos tab shows, or switch it on or off
+subnsub-helper photos add FOLDER      Show a local folder's pictures (at the machine, or from a page when the console is on)
+subnsub-helper photos remove ID       Stop showing a folder, named by its ID or its path
+subnsub-helper photos rescan          Have the running helper walk every shown folder again
 subnsub-helper clone [use|forget]     Show, import, or delete a delegated terminal access copy
 subnsub-helper run MACHINE -- CMD     Run a single command on a remote machine via a delegated copy
 subnsub-helper shell MACHINE          Open an interactive terminal on a remote machine
@@ -582,6 +597,7 @@ Every persistent toggle is stored as a file in `~/.config/subnsub-helper/`; envi
 | `MON_DERPMAP` | Custom HTTPS URL for the tailcat DERP map |
 | `MON_TRANSPORT` | `relay` or `tailcat`: force a single transport mode |
 | `MON_MUSIC` | Set `off` to share no music for this run, whatever `music.json` says |
+| `MON_PHOTOS` | Set `off` to show no photos for this run, whatever `photos.json` says |
 | `MON_WEBDAV_PASSWORD` | The password `music add-webdav` stores for the folder (asked for when unset) |
 | `MON_BEACON` | Set `off` to keep sending full snapshots to the relay while a direct tunnel is active |
 | `MON_IPV4` | `off`, or a custom `cdn-cgi/trace`-compatible HTTPS URL for public IPv4 lookup |
@@ -610,6 +626,7 @@ All state lives in `~/.config/subnsub-helper/` (mode `0700`):
 | `allowed-clients`, `tailcat.key`, `tailcat.psk`, `address` | Authorized browser node keys and WireGuard/tailcat tunnel credentials |
 | `pairing` | A pairing token from the self-hosted page's line and the browser key it is for, until that browser has the address (at most a week) |
 | `music.json`, `music-index.json` | The shared music folders once chosen (with `off` for `music off` at the machine), with a WebDAV folder's account and password (mode `0600`), and the index of their tracks |
+| `photos.json`, `photos-index.json` | The folders whose pictures are shown once chosen (with `off` for `photos off` at the machine), and the index of their pictures; the small copies are under the user cache folder (`subnsub-helper/photos`) |
 | `clone-access`, `clones`, `clones.revoked` | Client-side delegated access credential and host-side admitted/revoked copy records |
 | `probes.json`, `probes.key`, `probes-state.json` | Service probe definitions, target HMAC key, and rolling uptime buckets |
 | `metrics.d/`, `metrics.sock` | Custom metric definitions and the local Unix domain push socket |
