@@ -106,6 +106,8 @@ When copied from a signed-in dashboard, the install command also sets `MON_PUBKE
 gh attestation verify subnsub-helper-linux-amd64 --repo subnsub-tools/subnsub-helper
 ``` Verify downloaded scripts against [`install.sh`](install.sh) in this repository or build from source to confirm binary reproducibility.
 
+**macOS code signature:** the two macOS binaries are code-signed by the release workflow ([`go/sign-darwin.sh`](go/sign-darwin.sh)) under the identifier `com.subnsub.helper`, with the self-signed certificate in [`go/macos-signing-cert.pem`](go/macos-signing-cert.pem). macOS keeps the access a person gave a program (Downloads, Documents, another disk) against its signing identity; an unsigned or ad-hoc signed binary is a new program after every update and is asked about again, while one certificate and one identifier make every release the same program. The certificate is not issued by Apple and is no statement of origin — the attestation and the checksums above are. `codesign -d -r- ~/.local/bin/subnsub-helper` shows the identity: `identifier "com.subnsub.helper" and certificate root = H"48400064df8062436ac6e9db1091d76aff6509a4"`.
+
 **Platform notes:**
 - **FreeBSD:** Because FreeBSD has no default per-user service manager, `install.sh` installs the binary and token without modifying system files, then prints a ready-to-use `daemon(8)` command and an `/etc/rc.d` script you can install if desired.
 - **OpenWrt:** When run as `root`, the helper registers `/etc/init.d/subnsub-helper` (`procd`) via `subnsub-helper autostart` so it survives router reboots.
@@ -640,7 +642,7 @@ cd go && sh build.sh          # builds dist/subnsub-helper-<goos>-<goarch>, SHA2
 go test ./...
 ```
 
-Builds are reproducible (`CGO_ENABLED=0 -trimpath -buildvcs=false`). Compiling the same release commit produces byte-for-byte identical binaries matching `SHA256SUMS` and the `SUM_*` constants in [`install.sh`](install.sh):
+Builds are reproducible (`CGO_ENABLED=0 -trimpath -buildvcs=false`). Compiling the same release commit produces byte-for-byte identical binaries matching `SHA256SUMS` and the `SUM_*` constants in [`install.sh`](install.sh) — except the two macOS binaries, which a release signs after building them (see above) and which therefore match the "as built, before signing" checksums in that release's notes instead:
 
 ```sh
 cd go && sh build.sh && sha256sum dist/*

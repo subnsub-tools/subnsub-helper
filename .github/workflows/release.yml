@@ -4,6 +4,10 @@
 # publishes a DRAFT release: the eight binaries, SHA256SUMS, VERSION and
 # install.sh stamped with those checksums, each binary with a signed build
 # provenance attestation that names this workflow and the tagged commit.
+# The two macOS binaries are code-signed first (go/sign-darwin.sh) with the
+# certificate in go/macos-signing-cert.pem, whose private key is the secret
+# MACOS_SIGNING_KEY: macOS then knows each release as the same program and
+# keeps the folder access it was given, instead of asking after every update.
 # The maintainers check the draft against a live machine and then publish
 # it; only a published release is the one helpers update to
 # (releases/latest/download/VERSION). The site's copies
@@ -14,7 +18,8 @@
 #   gh attestation verify subnsub-helper-linux-amd64 --repo subnsub-tools/subnsub-helper
 #
 # Run by hand (workflow_dispatch), it builds and tests the branch and prints
-# the checksums, and publishes nothing.
+# the checksums, and publishes nothing. Where the secret is not set (a fork),
+# a run by hand leaves the macOS binaries as built; a tag fails.
 
 name: release
 
@@ -65,6 +70,23 @@ jobs:
           printf '%s\n' "$VERSION" > dist/VERSION
           said=$(dist/subnsub-helper-linux-amd64 version)
           [ "$said" = "$VERSION" ] || { echo "the build calls itself '$said', not $VERSION"; exit 1; }
+
+      # The only step that holds the key. The checksums of the two binaries
+      # as the compiler left them go into the release notes, for anyone
+      # comparing a build of their own: the signature is the one part of a
+      # release that cannot be rebuilt without the key.
+      - name: Sign the macOS binaries
+        env:
+          MACOS_SIGNING_KEY: ${{ secrets.MACOS_SIGNING_KEY }}
+        run: |
+          ( cd dist && sha256sum subnsub-helper-darwin-* ) > as-built-darwin.txt
+          if [ "$GITHUB_REF_TYPE" = tag ]; then export SIGN_REQUIRED=1; fi
+          SIGNING_TIME=$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)
+          export SIGNING_TIME
+          sh go/sign-darwin.sh "$PWD/dist"
+
+      - name: Stamp
+        run: |
           cp install.sh dist/install.sh
           sh go/stamp-install.sh dist dist/install.sh "$VERSION"
           cat dist/SHA256SUMS
@@ -91,7 +113,11 @@ jobs:
           install.sh carries every binary's SHA-256; SHA256SUMS lists them too. Check where a binary was built:
 
               gh attestation verify subnsub-helper-linux-amd64 --repo $GITHUB_REPOSITORY
+
+          The macOS binaries are code-signed (go/sign-darwin.sh), so that macOS keeps the access it was given across updates. As built, before signing:
+
           NOTES
+          sed 's/^/    /' as-built-darwin.txt >> notes.md
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "$VERSION" --notes-file notes.md \
             dist/VERSION dist/SHA256SUMS dist/install.sh dist/subnsub-helper-*
