@@ -95,6 +95,9 @@ var fetchDialTn = func(ctx context.Context, tn *fetchTn, agent string, priv key.
 	if err != nil {
 		return nil
 	}
+	if a, err := netip.ParseAddr(tn.IP); err == nil {
+		rd.peer = a
+	}
 	return rd
 }
 
@@ -108,6 +111,7 @@ type tnRoad struct {
 	pub    string
 	outer  *http.Client
 	hc     *http.Client
+	peer   netip.Addr // A on the tailnet, for asking Tailscale how it gets there
 
 	mu  sync.Mutex
 	ses *tnSes
@@ -165,9 +169,24 @@ func openTnRoad(ctx context.Context, base, machineKey, agent string, priv key.No
 
 func (t *tnRoad) HTTP() *http.Client { return t.hc }
 
-// Route is the tailnet's: how Tailscale carries it, direct or by its relays,
-// is the operating system's to know.
+// Route is the tailnet's.
 func (t *tnRoad) Route(ctx context.Context) string { return "tailnet" }
+
+// Via is how Tailscale carries it — straight between the two machines
+// ("direct"), through another node of the tailnet ("peer-relay") or through
+// a DERP server ("derp") — as this machine's tailscaled answers a ping to A
+// (tsping.go); "" when it does not say.
+func (t *tnRoad) Via(ctx context.Context) string {
+	if !t.peer.IsValid() {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, tsPingTimeout)
+	defer cancel()
+	if b := tsPingRead(ctx, t.peer); b != nil && b.OK {
+		return b.Via
+	}
+	return ""
+}
 
 func (t *tnRoad) Close() { t.outer.CloseIdleConnections() }
 

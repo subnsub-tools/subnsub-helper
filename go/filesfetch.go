@@ -4,12 +4,24 @@ package main
 
    The other half of filesgrant.go. A copy from computer A to this one (B)
    is no longer carried by the page — A to DERP to the page to DERP to here
-   — but fetched by this helper itself, from A's helper: over the
-   tailnet first where both are on one (fetchtailnet.go; user 2026-11-05:
-   first tailnet, then tailcat), else over tailcat, a direct UDP path where
-   the two can reach each other, DERP where they cannot
-   (PLAN-files-tailcat-direct.md). The page gives the orders and may then be
-   closed; this machine keeps the job and finishes it.
+   — but fetched by this helper itself, from A's helper: over the tailnet
+   where both are on one (fetchtailnet.go) and over tailcat, a direct UDP
+   path where the two can reach each other, DERP where they cannot
+   (PLAN-files-tailcat-direct.md), both at once (operator ruling 2026-11-15:
+   where there is a tailnet, the tailnet and tailcat carry it together, and
+   what one brings first ends the other's bringing of it; tailcat alone
+   where there is none — in place of 2026-11-05's "first tailnet, then
+   tailcat"). The page gives the orders and may then be closed; this machine
+   keeps the job and finishes it.
+
+   TWO ROADS. A file is fetched in pieces, and each road is a lane that
+   asks for the next piece nobody has asked for, so the faster road brings
+   more of the file and the two together more than either. A lane with
+   nothing new to ask for — the end of the file, or the pieces ahead of a
+   slow one filling the window — asks for the first piece the other is
+   still bringing: the one that arrives first is written and the other's
+   request for it is cancelled. Pieces are written in order, as before; a
+   lane whose road fails gives its piece up to the other and dials again.
 
      fetch-key     B makes a tailcat node key for one job and answers its
                    public half. The private half never leaves this machine.
@@ -19,8 +31,9 @@ package main
                    the grant's id, the files (path, size, modified time, the
                    name here, the part's key), the folder here, keep or
                    replace. Kept in the fetches file and answered at once.
-     fetch-status  how the jobs stand: each file's bytes, the rate, whether
-                   the path is direct or through DERP.
+     fetch-status  how the jobs stand: each file's bytes, the rate, and the
+                   roads: which carry it, how (direct, a peer relay, DERP)
+                   and how many bytes came by each.
      fetch-stop    a job stopped (its parts stay, so a new job for the same
                    files goes on from them), or a finished one forgotten.
 
@@ -83,15 +96,27 @@ const (
 	// that went away sends no reset through the tunnel, so the wait would
 	// otherwise be the whole piece's.
 	fetchPieceIdle = 30 * time.Second
-	// Questions failed in a row before the road to A is dialled again from
-	// nothing (redialRoad).
+	// Questions failed in a row before a road to A is dialled again from
+	// nothing (fetchLane).
 	fetchRedialAfter = 2
-	fetchAddrMax     = 1500
+	// With two roads: how far past what is written pieces may be asked for.
+	// It is what waits in memory for a slow piece ahead of it.
+	fetchAhead = 8 << 20
+	// With two roads a piece is at most this, about what its road moves in
+	// fetchPieceAim, and the first one on a road fetchPieceFirst.
+	fetchDualMax    = 2 << 20
+	fetchPieceAim   = time.Second
+	fetchPieceFirst = 256 << 10
+	fetchPieceMin   = 64 << 10
+	fetchAddrMax    = 1500
 	// What fetch-status answers with at most, all jobs together.
 	fetchStatusBytes = 160 << 10
 	// How often the path to A is looked at while a job runs.
 	fetchProbeEvery = 15 * time.Second
 )
+
+// fetchLaneLook is how often a lane whose road is resting looks again.
+var fetchLaneLook = 2 * time.Second
 
 var fetchAddrRe = regexp.MustCompile(`^tc[A-Za-z0-9_-]{16,}$`)
 
@@ -164,64 +189,434 @@ func (t *tailcatRoad) Close() {
 	t.cl.Close()
 }
 
-// redialRoad is the road to A, dialled again from nothing when questions
-// keep failing. A tailcat client whose peer went away and came back (A's
-// helper restarted, its network changed) does not always find it again by
-// itself: seen in filesfetch_e2e_test.go, where the old client's dials
+// fetchVia is a road that can say how it carries: the tailnet's, which asks
+// the operating system's Tailscale (direct, peer-relay, derp).
+type fetchVia interface {
+	Via(ctx context.Context) string
+}
+
+// fetchLane is one road to A for a job — the tailnet's or tailcat's — and
+// how it has done. Its road is dialled again from nothing when what is asked
+// on it keeps failing: a tailcat client whose peer went away and came back
+// (A's helper restarted, its network changed) does not always find it again
+// by itself — seen in filesfetch_e2e_test.go, where the old client's dials
 // waited on a handshake that never came while a new client got through at
-// once. The new client starts on its first question, so the old one is
-// closed before the two could stand at DERP under the same key.
-//
-// dial(tryTn) is the tailnet road when tryTn and it opens, else tailcat
-// (and says which). A road that kept failing is followed by the other: the
-// tailnet's by tailcat, tailcat's by the tailnet again.
-type redialRoad struct {
-	mu    sync.Mutex
-	dial  func(tryTn bool) (fetchRoad, bool)
-	cur   fetchRoad
-	curTn bool
-	hc    *http.Client
+// once. The old road is closed before the new one is dialled, so no two
+// clients stand at DERP under the same key. A tailnet road that would not
+// open is left alone for fetchTnRest.
+type fetchLane struct {
+	name string           // "tailnet" | "tailcat"
+	dial func() fetchRoad // nil when the road would not open
+
+	mu       sync.Mutex
+	road     fetchRoad
+	dialling chan struct{} // closed when the dial under way is over
+	closed   bool          // the job is over: no road is dialled again
+	rest     time.Time     // not dialled again before this
+	fails    int           // asked and failed, in a row
+	greeted  bool          // its hello named the machine the page named
+	rate     float64       // bytes a second, as its last pieces came
+	won      int64         // bytes of its pieces that were written
+	via      string        // how it carries: direct, peer-relay, derp, "" unknown
 }
 
-func newRedialRoad(dial func(tryTn bool) (fetchRoad, bool)) *redialRoad {
-	r := &redialRoad{dial: dial}
-	r.cur, r.curTn = dial(true)
-	r.hc = r.cur.HTTP()
-	return r
+// client is the road's HTTP client, the road dialled first when it is not
+// up (a dial under way is waited for: opening a tailnet session is a round
+// trip); nil while the road rests.
+func (l *fetchLane) client() *http.Client {
+	for {
+		l.mu.Lock()
+		if l.road != nil {
+			hc := l.road.HTTP()
+			l.mu.Unlock()
+			return hc
+		}
+		if w := l.dialling; w != nil {
+			l.mu.Unlock()
+			<-w
+			continue
+		}
+		if l.closed || time.Now().Before(l.rest) {
+			l.mu.Unlock()
+			return nil
+		}
+		w := make(chan struct{})
+		l.dialling = w
+		l.mu.Unlock()
+		// Dialled outside the lock: the path's probe asks for the road
+		// meanwhile.
+		rd := l.dial()
+		l.mu.Lock()
+		l.dialling = nil
+		late := l.closed && rd != nil
+		switch {
+		case late:
+		case rd == nil:
+			l.rest = time.Now().Add(fetchTnRest)
+		default:
+			l.road = rd
+		}
+		l.mu.Unlock()
+		if late {
+			// Dialled while the job ended: not kept.
+			rd.Close()
+		}
+		close(w)
+	}
 }
 
-func (r *redialRoad) HTTP() *http.Client {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.hc
+// bad is a question on the lane that got no answer; after fetchRedialAfter
+// in a row its road is closed, to be dialled again.
+func (l *fetchLane) bad() {
+	l.mu.Lock()
+	l.fails++
+	var old fetchRoad
+	if l.fails%fetchRedialAfter == 0 {
+		old, l.road, l.greeted = l.road, nil, false
+	}
+	l.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
 }
 
-func (r *redialRoad) Route(ctx context.Context) string {
-	r.mu.Lock()
-	c := r.cur
-	r.mu.Unlock()
-	return c.Route(ctx)
+func (l *fetchLane) good() {
+	l.mu.Lock()
+	l.fails = 0
+	l.mu.Unlock()
 }
 
-func (r *redialRoad) redial() {
-	r.mu.Lock()
-	tryTn := !r.curTn
-	r.mu.Unlock()
-	// Dialled outside the lock: opening a tailnet session is a round trip,
-	// and the path's probe asks for the road meanwhile.
-	nr, isTn := r.dial(tryTn)
-	r.mu.Lock()
-	old := r.cur
-	r.cur, r.curTn, r.hc = nr, isTn, nr.HTTP()
-	r.mu.Unlock()
-	old.Close()
+// took is n bytes the lane brought in dt.
+func (l *fetchLane) took(n int, dt time.Duration) {
+	l.mu.Lock()
+	l.fails = 0
+	if n > 0 && dt > 0 {
+		inst := float64(n) / dt.Seconds()
+		if l.rate == 0 {
+			l.rate = inst
+		} else {
+			l.rate = 0.6*l.rate + 0.4*inst
+		}
+	}
+	l.mu.Unlock()
 }
 
-func (r *redialRoad) Close() {
-	r.mu.Lock()
-	c := r.cur
-	r.mu.Unlock()
-	c.Close()
+func (l *fetchLane) close() {
+	l.mu.Lock()
+	rd := l.road
+	l.road, l.closed = nil, true
+	l.mu.Unlock()
+	if rd != nil {
+		rd.Close()
+	}
+}
+
+// look asks the lane's road how it carries now.
+func (l *fetchLane) look(ctx context.Context) {
+	l.mu.Lock()
+	rd := l.road
+	l.mu.Unlock()
+	if rd == nil {
+		return
+	}
+	via := rd.Route(ctx)
+	if v, ok := rd.(fetchVia); ok {
+		via = v.Via(ctx)
+	} else if via == "tailnet" {
+		via = ""
+	}
+	if via != "" {
+		l.mu.Lock()
+		l.via = via
+		l.mu.Unlock()
+	}
+}
+
+// fetchRoads is a job's roads to A: the tailnet's where A has a listener
+// there, then tailcat's.
+type fetchRoads struct {
+	lanes []*fetchLane
+}
+
+// pick is the lane a question goes by: the one that has failed least of
+// late, the tailnet's before tailcat's when they are even — so a question
+// that keeps failing goes from one road to the other and back, and a road
+// that has come back is found again — and the next when that one's road
+// cannot be had.
+func (r *fetchRoads) pick() (*fetchLane, *http.Client) {
+	order := append([]*fetchLane{}, r.lanes...)
+	fails := map[*fetchLane]int{}
+	for _, l := range order {
+		l.mu.Lock()
+		fails[l] = l.fails
+		l.mu.Unlock()
+	}
+	sort.SliceStable(order, func(a, b int) bool { return fails[order[a]] < fails[order[b]] })
+	for _, l := range order {
+		if hc := l.client(); hc != nil {
+			return l, hc
+		}
+	}
+	return nil, nil
+}
+
+// aim is how large a piece lane li asks for next. One road asks for the
+// most A gives, as it always did. With two, about what the lane moves in
+// fetchPieceAim — and less on the slower one, so that the faster does not
+// fill the window before the slower's piece is in: a piece both would then
+// bring twice.
+func (r *fetchRoads) aim(li int, max int64) int64 {
+	if len(r.lanes) < 2 {
+		return max
+	}
+	if max > fetchDualMax {
+		max = fetchDualMax
+	}
+	var mine, best float64
+	for i, l := range r.lanes {
+		l.mu.Lock()
+		if i == li {
+			mine = l.rate
+		}
+		if l.rate > best {
+			best = l.rate
+		}
+		l.mu.Unlock()
+	}
+	n := int64(fetchPieceFirst)
+	if mine > 0 {
+		n = int64(mine * fetchPieceAim.Seconds())
+		if mine < best {
+			if m := int64(mine / best * float64(fetchAhead/2)); m < n {
+				n = m
+			}
+		}
+	}
+	if n < fetchPieceMin {
+		n = fetchPieceMin
+	}
+	if n > max {
+		n = max
+	}
+	return n
+}
+
+func (r *fetchRoads) close() {
+	for _, l := range r.lanes {
+		l.close()
+	}
+}
+
+// fetchRoadView is one road as fetch-status shows it.
+type fetchRoadView struct {
+	K   string `json:"k"`             // tailnet | tailcat
+	Via string `json:"via,omitempty"` // direct | peer-relay | derp
+	B   int64  `json:"b"`             // bytes it brought that were written
+}
+
+// views is the roads as they stand, and the one word older pages read: the
+// road that brought the most ("tailnet", "direct", "derp").
+func (r *fetchRoads) views() ([]fetchRoadView, string) {
+	var out []fetchRoadView
+	route, most := "", int64(-1)
+	for _, l := range r.lanes {
+		l.mu.Lock()
+		up, won, via := l.road != nil, l.won, l.via
+		l.mu.Unlock()
+		if !up && won == 0 {
+			continue
+		}
+		out = append(out, fetchRoadView{K: l.name, Via: via, B: won})
+		if won > most {
+			most = won
+			if l.name == "tailnet" {
+				route = "tailnet"
+			} else if via == "direct" || via == "derp" {
+				route = via
+			}
+		}
+	}
+	return out, route
+}
+
+// fetchPart is a piece of the file being fetched: asked for on one road, or
+// on both when the other has nothing else to bring.
+type fetchPart struct {
+	off, n int64
+	buf    []byte               // the piece, once a road brought it whole
+	lane   int                  // the road that did
+	by     []context.CancelFunc // each lane's asking for it, nil when it is not
+	gone   bool                 // dropped: the part here was found again elsewhere
+}
+
+func (p *fetchPart) asked() bool {
+	for _, c := range p.by {
+		if c != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchSpread is one file's pieces, handed out to the lanes and gathered
+// back in order.
+type fetchSpread struct {
+	mu     sync.Mutex
+	ch     chan struct{} // closed, and made again, when something changed
+	lanes  int
+	size   int64
+	max    int64        // a piece, at most
+	have   int64        // written
+	next   int64        // the first byte no lane was asked for
+	parts  []*fetchPart // asked for and not yet written, in order
+	tok    string       // the file as A opened it
+	gen    int          // of tok
+	reopen bool         // a lane found the token lapsed
+	fatal  string       // a code that ends the job
+}
+
+func (s *fetchSpread) changedLocked() {
+	close(s.ch)
+	s.ch = make(chan struct{})
+}
+
+// end is a code after which the job cannot go on.
+func (s *fetchSpread) end(code string) {
+	s.mu.Lock()
+	if s.fatal == "" {
+		s.fatal = code
+	}
+	s.changedLocked()
+	s.mu.Unlock()
+}
+
+// reset starts over from have: the part here turned out to hold something
+// else than what was handed out (it was found again, or written elsewhere).
+func (s *fetchSpread) reset(have int64) {
+	s.mu.Lock()
+	for _, p := range s.parts {
+		p.gone = true
+		for _, c := range p.by {
+			if c != nil {
+				c()
+			}
+		}
+	}
+	s.parts, s.have, s.next = nil, have, have
+	s.changedLocked()
+	s.mu.Unlock()
+}
+
+func (s *fetchSpread) pickLocked(li int, aim int64) *fetchPart {
+	// One nobody is bringing: its road failed.
+	for _, p := range s.parts {
+		if p.buf == nil && !p.asked() {
+			return p
+		}
+	}
+	// A new one, while what is asked for stays within the window.
+	if s.next < s.size && (len(s.parts) == 0 || s.next-s.have < fetchAhead) {
+		n := s.size - s.next
+		if n > aim {
+			n = aim
+		}
+		if n > s.max {
+			n = s.max
+		}
+		p := &fetchPart{off: s.next, n: n, by: make([]context.CancelFunc, s.lanes)}
+		s.next += n
+		s.parts = append(s.parts, p)
+		return p
+	}
+	// Nothing new to ask for — the end of the file, or the window full
+	// behind a piece the other road is still bringing: the first such piece
+	// is asked for here as well, and whichever road brings it first ends
+	// the other's asking.
+	for _, p := range s.parts {
+		if p.buf == nil && p.by[li] == nil {
+			return p
+		}
+	}
+	return nil
+}
+
+// take is the piece lane li fetches next, waited for: the piece, the
+// context its asking lives in, and the file's token; nil when the file is
+// over for the lane.
+func (s *fetchSpread) take(ctx context.Context, li int, aim int64) (*fetchPart, context.Context, context.CancelFunc, string, int) {
+	for {
+		s.mu.Lock()
+		if s.fatal != "" || ctx.Err() != nil {
+			s.mu.Unlock()
+			return nil, nil, nil, "", 0
+		}
+		if !s.reopen {
+			if p := s.pickLocked(li, aim); p != nil {
+				pctx, cancel := context.WithCancel(ctx)
+				p.by[li] = cancel
+				tok, gen := s.tok, s.gen
+				s.mu.Unlock()
+				return p, pctx, cancel, tok, gen
+			}
+		}
+		ch := s.ch
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, nil, nil, "", 0
+		case <-ch:
+		}
+	}
+}
+
+// brought is lane li done asking for p: with the piece (buf), or without.
+// It says whether the piece was the other road's already, or dropped — the
+// lane's asking was ended for it, and its road is not to blame.
+func (s *fetchSpread) brought(p *fetchPart, li int, buf []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.by[li] = nil
+	if p.gone || p.buf != nil {
+		return true
+	}
+	if buf != nil {
+		p.buf, p.lane = buf, li
+		for _, c := range p.by {
+			if c != nil {
+				c()
+			}
+		}
+	}
+	// Brought, or given up for the other lane to take.
+	s.changedLocked()
+	return false
+}
+
+// lapsed is a lane told the token is no longer A's (ten idle minutes, or A
+// restarted): the file is opened again, and the lane waits for that.
+func (s *fetchSpread) lapsed(ctx context.Context, gen int) bool {
+	for {
+		s.mu.Lock()
+		if s.fatal != "" {
+			s.mu.Unlock()
+			return false
+		}
+		if s.gen != gen {
+			s.mu.Unlock()
+			return true
+		}
+		if !s.reopen {
+			s.reopen = true
+			s.changedLocked()
+		}
+		ch := s.ch
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ch:
+		}
+	}
 }
 
 // idleReader cancels its piece when no byte has come in for a while.
@@ -285,6 +680,7 @@ type fetchRun struct {
 	cancel context.CancelFunc
 	stop   bool
 	rate   float64
+	roads  *fetchRoads // while it runs
 }
 
 var fetches = struct {
@@ -656,21 +1052,22 @@ func fetchAbsAnywhere(p string) bool {
 
 // fetchView is a job as fetch-status shows it: no key, no address.
 type fetchView struct {
-	Job   string      `json:"job"`
-	Agent string      `json:"agent"`
-	St    string      `json:"st"`
-	Err   string      `json:"err,omitempty"`
-	Route string      `json:"route,omitempty"`
-	Rate  int64       `json:"rate"`
-	Got   int64       `json:"got"`
-	Size  int64       `json:"size"`
-	Dir   string      `json:"dir"`
-	Mode  string      `json:"mode"`
-	Mv    bool        `json:"mv,omitempty"`
-	Grant string      `json:"grant,omitempty"`
-	Items []fetchItem `json:"items"`
-	At    int64       `json:"at"`
-	End   int64       `json:"end,omitempty"`
+	Job   string          `json:"job"`
+	Agent string          `json:"agent"`
+	St    string          `json:"st"`
+	Err   string          `json:"err,omitempty"`
+	Route string          `json:"route,omitempty"`
+	Roads []fetchRoadView `json:"roads,omitempty"`
+	Rate  int64           `json:"rate"`
+	Got   int64           `json:"got"`
+	Size  int64           `json:"size"`
+	Dir   string          `json:"dir"`
+	Mode  string          `json:"mode"`
+	Mv    bool            `json:"mv,omitempty"`
+	Grant string          `json:"grant,omitempty"`
+	Items []fetchItem     `json:"items"`
+	At    int64           `json:"at"`
+	End   int64           `json:"end,omitempty"`
 }
 
 func (f *fetchRun) view() fetchView {
@@ -685,6 +1082,9 @@ func (f *fetchRun) view() fetchView {
 	}
 	if r.St == "run" {
 		v.Rate = int64(f.rate)
+		if f.roads != nil {
+			v.Roads, _ = f.roads.views()
+		}
 	}
 	return v
 }
@@ -737,20 +1137,33 @@ func (f *fetchRun) work(ctx context.Context) (string, string) {
 	}
 	signer := exactKey(r.By)
 	pub := priv.Public()
-	// The tailnet first, where A has a listener there and this machine is on
-	// a tailnet; one that would not open is left alone for fetchTnRest.
-	var tnFailed time.Time
-	road := newRedialRoad(func(tryTn bool) (fetchRoad, bool) {
-		if tryTn && r.Tn != nil && (tnFailed.IsZero() || time.Since(tnFailed) > fetchTnRest) {
-			if rd := fetchDialTn(ctx, r.Tn, r.Agent, priv); rd != nil {
-				return rd, true
-			}
-			tnFailed = time.Now()
+	// The roads: the tailnet's where A has a listener there (this machine on
+	// no tailnet, or a listener that would not open, is a lane that rests),
+	// and tailcat's.
+	roads := &fetchRoads{}
+	if r.Tn != nil {
+		roads.lanes = append(roads.lanes, &fetchLane{name: "tailnet", dial: func() fetchRoad { return fetchDialTn(ctx, r.Tn, r.Agent, priv) }})
+	}
+	roads.lanes = append(roads.lanes, &fetchLane{name: "tailcat", dial: func() fetchRoad { return fetchDial(r.Addr, priv) }})
+	f.mu.Lock()
+	f.roads = roads
+	f.mu.Unlock()
+	note := func() {
+		_, rt := roads.views()
+		f.mu.Lock()
+		if rt != "" {
+			f.rec.Route = rt
 		}
-		return fetchDial(r.Addr, priv), false
-	})
-	defer road.Close()
-	// The path, looked at now and then while the job runs.
+		f.mu.Unlock()
+	}
+	defer func() {
+		note()
+		f.mu.Lock()
+		f.roads = nil
+		f.mu.Unlock()
+		roads.close()
+	}()
+	// The paths, looked at now and then while the job runs.
 	pctx, pcancel := context.WithCancel(ctx)
 	defer pcancel()
 	go func() {
@@ -762,16 +1175,22 @@ func (f *fetchRun) work(ctx context.Context) (string, string) {
 				return
 			case <-clock.C:
 			}
-			if rt := road.Route(pctx); rt != "" {
-				f.mu.Lock()
-				f.rec.Route = rt
-				f.mu.Unlock()
+			for _, l := range roads.lanes {
+				l.look(pctx)
 			}
+			note()
 			clock.Reset(fetchProbeEvery)
 		}
 	}()
-	j := &fetchJob{f: f, ctx: ctx, road: road, rec: r, signer: signer, pub: pub, last: time.Now()}
-	if code := j.hello(); code != "" {
+	j := &fetchJob{f: f, ctx: ctx, roads: roads, rec: r, signer: signer, pub: pub, last: time.Now()}
+	j.gctx, j.gcancel = context.WithCancel(ctx)
+	// The hellos greet left on their way are over before the roads close:
+	// none dials, or asks, on a road the job has let go.
+	defer func() {
+		j.gcancel()
+		j.greets.Wait()
+	}()
+	if code := j.greet(); code != "" {
 		return "err", code
 	}
 	for i := range r.Items {
@@ -798,12 +1217,17 @@ func (f *fetchRun) work(ctx context.Context) (string, string) {
 type fetchJob struct {
 	f      *fetchRun
 	ctx    context.Context
-	road   *redialRoad
+	roads  *fetchRoads
 	rec    fetchRec
 	signer ed25519.PublicKey
 	pub    key.NodePublic
 	last   time.Time // when a byte last moved, or the job began
 	tries  int
+
+	// greet's hellos: their context, ended with the job, and their count.
+	gctx    context.Context
+	gcancel context.CancelFunc
+	greets  sync.WaitGroup
 }
 
 // still is what the job may not go on without: the key that signed it
@@ -828,9 +1252,6 @@ func (j *fetchJob) again() string {
 		return "unreachable"
 	}
 	j.tries++
-	if j.tries%fetchRedialAfter == 0 {
-		j.road.redial()
-	}
 	select {
 	case <-j.ctx.Done():
 		return "stopped"
@@ -844,21 +1265,33 @@ func (j *fetchJob) moved() {
 	j.tries = 0
 }
 
-// ask is one question to A, asked again while A cannot be reached.
-func (j *fetchJob) ask(do func(ctx context.Context) string) string {
+// ask is one question to A, asked again while A cannot be reached: by the
+// first road that is up and has not just failed (the tailnet's before
+// tailcat's), and by the other when that one does not answer.
+func (j *fetchJob) ask(do func(ctx context.Context, l *fetchLane, hc *http.Client) string) string {
 	for {
 		if code := j.still(); code != "" {
 			return code
 		}
-		ctx, cancel := context.WithTimeout(j.ctx, fetchAsk)
-		code := do(ctx)
-		cancel()
+		code := "unreachable"
+		l, hc := j.roads.pick()
+		if hc != nil {
+			ctx, cancel := context.WithTimeout(j.ctx, fetchAsk)
+			code = do(ctx, l, hc)
+			cancel()
+		}
 		if code == "not-allowed" {
 			// The grant is gone: revoked, run out, or its key unpinned on A.
 			return "grant-gone"
 		}
 		if code == "" || fatalFetch(code) {
+			if l != nil {
+				l.good()
+			}
 			return code
+		}
+		if l != nil {
+			l.bad()
 		}
 		if why := j.again(); why != "" {
 			return why
@@ -866,33 +1299,96 @@ func (j *fetchJob) ask(do func(ctx context.Context) string) string {
 	}
 }
 
-// hello makes sure the machine at the address is the one the page named.
+// helloOn asks the machine at the end of one road who it is: it must be the
+// one the page named.
+func (j *fetchJob) helloOn(ctx context.Context, hc *http.Client) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://tailcat/v1/hello", nil)
+	if err != nil {
+		return "unavailable"
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "unreachable"
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return "unreachable"
+	}
+	if resp.StatusCode != http.StatusOK {
+		return frameCode(b, resp.StatusCode)
+	}
+	fr, err := transport.Decode(b)
+	if err != nil || fr.Type != transport.TypeHello {
+		return "bad-frame"
+	}
+	if fr.AgentID != j.rec.Agent {
+		return "wrong-machine"
+	}
+	return ""
+}
+
+func (l *fetchLane) greet() {
+	l.mu.Lock()
+	l.greeted, l.fails = true, 0
+	l.mu.Unlock()
+}
+
+// greet makes sure the machine at the address is the one the page named,
+// on every road at once: the job goes on with the first that answers, and
+// a road is asked for no piece before its own hello (lane). When none
+// answers, the question is asked again as any other is (hello).
+func (j *fetchJob) greet() string {
+	ch := make(chan string, len(j.roads.lanes))
+	for _, l := range j.roads.lanes {
+		j.greets.Add(1)
+		go func(l *fetchLane) {
+			defer j.greets.Done()
+			hc := l.client()
+			if hc == nil || j.gctx.Err() != nil {
+				ch <- "unreachable"
+				return
+			}
+			ctx, cancel := context.WithTimeout(j.gctx, fetchAsk)
+			defer cancel()
+			code := j.helloOn(ctx, hc)
+			switch {
+			case j.gctx.Err() != nil:
+				// The job ended under it: the road is not to blame.
+				code = "unreachable"
+			case code == "":
+				l.greet()
+			case code != "not-allowed" && !fatalFetch(code):
+				l.bad()
+			}
+			ch <- code
+		}(l)
+	}
+	for range j.roads.lanes {
+		code := <-ch
+		if code == "not-allowed" {
+			code = "grant-gone"
+		}
+		if code == "" {
+			j.moved()
+			return ""
+		}
+		if fatalFetch(code) {
+			return code
+		}
+	}
+	return j.hello()
+}
+
+// hello is greet's question on one road at a time, asked again while A
+// cannot be reached.
 func (j *fetchJob) hello() string {
-	code := j.ask(func(ctx context.Context) string {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://tailcat/v1/hello", nil)
-		if err != nil {
-			return "unavailable"
+	code := j.ask(func(ctx context.Context, l *fetchLane, hc *http.Client) string {
+		code := j.helloOn(ctx, hc)
+		if code == "" {
+			l.greet()
 		}
-		resp, err := j.road.HTTP().Do(req)
-		if err != nil {
-			return "unreachable"
-		}
-		defer resp.Body.Close()
-		b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if err != nil {
-			return "unreachable"
-		}
-		if resp.StatusCode != http.StatusOK {
-			return frameCode(b, resp.StatusCode)
-		}
-		fr, err := transport.Decode(b)
-		if err != nil || fr.Type != transport.TypeHello {
-			return "bad-frame"
-		}
-		if fr.AgentID != j.rec.Agent {
-			return "wrong-machine"
-		}
-		return ""
+		return code
 	})
 	if code == "" {
 		j.moved()
@@ -904,9 +1400,9 @@ func (j *fetchJob) hello() string {
 // page saw of it.
 func (j *fetchJob) open(it fetchItem) (filesOpenBody, string) {
 	var ob filesOpenBody
-	code := j.ask(func(ctx context.Context) string {
+	code := j.ask(func(ctx context.Context, _ *fetchLane, hc *http.Client) string {
 		ob = filesOpenBody{}
-		return grantPost(ctx, j.road.HTTP(), "/v1/files/grant/open", grantReq{ID: j.rec.Grant, Path: it.P}, &ob)
+		return grantPost(ctx, hc, "/v1/files/grant/open", grantReq{ID: j.rec.Grant, Path: it.P}, &ob)
 	})
 	if code != "" {
 		return ob, code
@@ -920,10 +1416,11 @@ func (j *fetchJob) open(it fetchItem) (filesOpenBody, string) {
 	return ob, ""
 }
 
-// piece is n bytes of the opened file from off: exactly that many, or why
-// not.
-func (j *fetchJob) piece(tok string, off, n int64) ([]byte, string) {
-	ctx, cancel := context.WithCancel(j.ctx)
+// piece is n bytes of the opened file from off, by one road: exactly that
+// many, or why not. Its asking ends with ctx: when the job stops, or when
+// the other road brought the same piece first.
+func (j *fetchJob) piece(ctx context.Context, hc *http.Client, tok string, off, n int64) ([]byte, string) {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	idle := time.AfterFunc(fetchPieceIdle, cancel)
 	defer idle.Stop()
@@ -932,7 +1429,7 @@ func (j *fetchJob) piece(tok string, off, n int64) ([]byte, string) {
 	if err != nil {
 		return nil, "unavailable"
 	}
-	resp, err := j.road.HTTP().Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		if j.ctx.Err() != nil {
 			return nil, "stopped"
@@ -955,6 +1452,96 @@ func (j *fetchJob) piece(tok string, off, n int64) ([]byte, string) {
 		return nil, "changed"
 	}
 	return b, ""
+}
+
+// lane is one road at work on a file: it says hello where it has not, then
+// asks for piece after piece until the file is over. A piece the road could
+// not bring is given up for the other lane, and the road rests before it
+// asks again.
+func (j *fetchJob) lane(ctx context.Context, s *fetchSpread, li int) {
+	l := j.roads.lanes[li]
+	tries := 0
+	rest := func(d time.Duration) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(d):
+			return true
+		}
+	}
+	failed := func() bool {
+		l.bad()
+		tries++
+		return rest(fetchBackoff(tries))
+	}
+	for ctx.Err() == nil {
+		hc := l.client()
+		if hc == nil {
+			if !rest(fetchLaneLook) {
+				return
+			}
+			continue
+		}
+		l.mu.Lock()
+		greeted := l.greeted
+		l.mu.Unlock()
+		if !greeted {
+			hctx, cancel := context.WithTimeout(ctx, fetchAsk)
+			code := j.helloOn(hctx, hc)
+			cancel()
+			switch {
+			case ctx.Err() != nil:
+				return
+			case code == "":
+				l.greet()
+			case code == "not-allowed":
+				s.end("grant-gone")
+				return
+			case fatalFetch(code):
+				s.end(code)
+				return
+			default:
+				if !failed() {
+					return
+				}
+				continue
+			}
+		}
+		p, pctx, cancel, tok, gen := s.take(ctx, li, j.roads.aim(li, s.max))
+		if p == nil {
+			return
+		}
+		t0 := time.Now()
+		buf, code := j.piece(pctx, hc, tok, p.off, p.n)
+		cancel()
+		if code != "" {
+			buf = nil
+		}
+		others := s.brought(p, li, buf)
+		switch {
+		case code == "":
+			l.took(len(buf), time.Since(t0))
+			tries = 0
+		case ctx.Err() != nil:
+			return
+		case others:
+			// The other road brought it first, and ended this asking.
+		case code == "no-file":
+			if !s.lapsed(ctx, gen) {
+				return
+			}
+		case code == "not-allowed":
+			s.end("grant-gone")
+			return
+		case fatalFetch(code):
+			s.end(code)
+			return
+		default:
+			if !failed() {
+				return
+			}
+		}
+	}
 }
 
 // put is the part here for one file, opened or found again: its upload and
@@ -986,7 +1573,8 @@ func (j *fetchJob) progress(i int, have int64, n int, dt time.Duration) {
 	f.mu.Unlock()
 }
 
-// item fetches file i of the job.
+// item fetches file i of the job: its pieces asked for by every road at
+// once (lane), written here in order as they come.
 func (j *fetchJob) item(i int) string {
 	it := j.rec.Items[i]
 	if code := j.still(); code != "" {
@@ -1006,48 +1594,87 @@ func (j *fetchJob) item(i int) string {
 		filesPutForget(p)
 		p.end("stopped", false)
 	}
+	max := int64(ob.Max)
+	if max <= 0 || max > filesReadMax {
+		max = filesReadMax
+	}
+	s := &fetchSpread{ch: make(chan struct{}), lanes: len(j.roads.lanes), size: it.S, max: max, have: have, next: have, tok: ob.T}
+	ictx, icancel := context.WithCancel(j.ctx)
+	var wg sync.WaitGroup
+	// The lanes are over before this returns: nothing asks A for a file the
+	// job has left.
+	defer func() {
+		icancel()
+		wg.Wait()
+	}()
+	if have < it.S {
+		for li := range j.roads.lanes {
+			wg.Add(1)
+			go func(li int) {
+				defer wg.Done()
+				j.lane(ictx, s, li)
+			}(li)
+		}
+	}
 	reopened := false
+	var acc int
+	accAt := time.Now()
 	for have < it.S {
-		if code := j.still(); code != "" {
+		s.mu.Lock()
+		fatal, lapsed := s.fatal, s.reopen
+		var part *fetchPart
+		if fatal == "" && len(s.parts) > 0 && s.parts[0].buf != nil {
+			part = s.parts[0]
+			s.parts = s.parts[1:]
+		}
+		ch := s.ch
+		s.mu.Unlock()
+		// A piece that is here is written before anything else is looked
+		// at: a job stopped keeps what it had fetched, in its part.
+		code := ""
+		if part == nil {
+			code = j.still()
+		}
+		switch {
+		case part != nil:
+		case fatal == "changed":
+			filesPutCancel(j.pub, tok)
+			return fatal
+		case fatal != "":
+			stopPut()
+			return fatal
+		case code != "":
 			stopPut()
 			return code
-		}
-		n := it.S - have
-		max := int64(ob.Max)
-		if max <= 0 || max > filesReadMax {
-			max = filesReadMax
-		}
-		if n > max {
-			n = max
-		}
-		t0 := time.Now()
-		buf, code := j.piece(ob.T, have, n)
-		switch {
-		case code == "":
-		case code == "no-file":
+		case time.Since(j.last) > fetchGiveUp:
+			stopPut()
+			return "unreachable"
+		case lapsed:
 			// The token lapsed on A (ten idle minutes, or A restarted).
-			if ob, code = j.open(it); code != "" {
+			nob, code := j.open(it)
+			if code != "" {
 				stopPut()
 				return code
 			}
+			s.mu.Lock()
+			s.tok, s.reopen = nob.T, false
+			s.gen++
+			s.changedLocked()
+			s.mu.Unlock()
 			continue
-		case code == "changed":
-			filesPutCancel(j.pub, tok)
-			return code
-		case code == "not-allowed":
-			stopPut()
-			return "grant-gone"
-		case fatalFetch(code):
-			stopPut()
-			return code
 		default:
-			if why := j.again(); why != "" {
-				stopPut()
-				return why
+			select {
+			case <-ch:
+			case <-j.ctx.Done():
+			case <-time.After(time.Second):
 			}
 			continue
 		}
-		got, wcode := p.write(j.ctx, have, buf)
+		if part.off != have {
+			s.reset(have)
+			continue
+		}
+		got, wcode := p.write(j.ctx, have, part.buf)
 		switch wcode {
 		case "":
 		case "no-put", "offset":
@@ -1060,6 +1687,7 @@ func (j *fetchJob) item(i int) string {
 			if p, tok, have, code = j.put(it); code != "" {
 				return code
 			}
+			s.reset(have)
 			continue
 		case "gone":
 			stopPut()
@@ -1068,10 +1696,38 @@ func (j *fetchJob) item(i int) string {
 			stopPut()
 			return wcode
 		}
-		have = got
 		reopened = false
+		l := j.roads.lanes[part.lane]
+		l.mu.Lock()
+		l.won += part.n
+		l.mu.Unlock()
+		acc += int(got - have)
+		have = got
+		if got != part.off+part.n {
+			// The part holds more than this piece put there: someone else
+			// wrote it too. On from what it holds.
+			s.reset(have)
+		} else {
+			s.mu.Lock()
+			s.have = have
+			s.changedLocked()
+			s.mu.Unlock()
+		}
 		j.moved()
-		j.progress(i, have, len(buf), time.Since(t0))
+		if dt := time.Since(accAt); dt >= 500*time.Millisecond || have >= it.S {
+			j.progress(i, have, acc, dt)
+			acc, accAt = 0, time.Now()
+		} else {
+			j.progress(i, have, 0, 0)
+		}
+	}
+	icancel()
+	wg.Wait()
+	// Every byte is in the part. A job stopped meanwhile, or one whose key
+	// was unpinned, leaves it there, a part: the file is not named.
+	if code := j.still(); code != "" {
+		stopPut()
+		return code
 	}
 	db, code := filesPutDone(j.pub, tok, it.M, j.rec.Mode)
 	if code == "no-put" {
@@ -1103,5 +1759,7 @@ func (j *fetchJob) item(i int) string {
 func (j *fetchJob) grantDone() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	grantPost(ctx, j.road.HTTP(), "/v1/files/grant/done", grantReq{ID: j.rec.Grant}, nil)
+	if _, hc := j.roads.pick(); hc != nil {
+		grantPost(ctx, hc, "/v1/files/grant/done", grantReq{ID: j.rec.Grant}, nil)
+	}
 }

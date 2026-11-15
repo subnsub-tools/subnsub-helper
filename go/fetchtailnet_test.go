@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -67,13 +68,23 @@ func newTnFetchBench(t *testing.T, f *filesFixture, machineKey string) *tnFetchB
 	return b
 }
 
-func TestFetchGoesOverTheTailnetFirst(t *testing.T) {
+// Where A has a listener on the tailnet, the tailnet and tailcat carry the
+// file together.
+func TestFetchGoesOverTheTailnetAndTailcatAtOnce(t *testing.T) {
 	f := newFetchFixture(t)
 	b := newTnFetchBench(t, f, "")
 	src := filepath.Join(f.home, "Documents", "tn.bin")
-	want := randomFile(t, src, 5<<20+77)
+	want := randomFile(t, src, 12<<20+77)
 	fi, _ := os.Stat(src)
 	dir := filepath.Join(f.home, "Reports")
+	// Each of tailcat's pieces takes a moment, as a road does: neither is
+	// through before the other has begun.
+	setRoadHook(func(r *http.Request) error {
+		if r.URL.Path == "/v1/files/file" {
+			time.Sleep(20 * time.Millisecond)
+		}
+		return nil
+	})
 	f.startFetch(t, fetchSpec{job: "job-tnet-0001", src: src, dir: dir, k: "partkey-tnet-0001", s: fi.Size(), m: fi.ModTime().Unix(), tn: b.tn})
 	v := f.fetchUntil(t, "job-tnet-0001", finished)
 	if v.St != "done" {
@@ -82,18 +93,23 @@ func TestFetchGoesOverTheTailnetFirst(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(dir, "tn.bin")); string(got) != string(want) {
 		t.Fatal("the copy differs")
 	}
-	// The hello, the open, two pieces and the grant's end, all on the tailnet;
-	// tailcat never dialled.
-	if d := roadDials.Load(); d != 0 {
+	// One road of each, and pieces asked for on both.
+	if d := roadDials.Load(); d != 1 {
 		t.Fatalf("tailcat dialled %d times", d)
 	}
-	if d, n := b.dials.Load(), b.rpcs.Load(); d != 1 || n < 5 {
+	if d, n := b.dials.Load(), b.rpcs.Load(); d != 1 || n < 3 {
 		t.Fatalf("tailnet: %d dials, %d questions", d, n)
+	}
+	if offs := pieceOffsets(); len(offs) == 0 {
+		t.Fatal("tailcat was asked for no piece")
+	}
+	if v.Route == "" {
+		t.Fatalf("no road named: %+v", v)
 	}
 }
 
-// A road that breaks down on the way: the job goes on by tailcat, from the
-// part it has.
+// A road that breaks down on the way: the other brings the rest, the
+// broken one's piece among it.
 func TestFetchGoesByTailcatWhenTheTailnetFails(t *testing.T) {
 	f := newFetchFixture(t)
 	b := newTnFetchBench(t, f, "")
@@ -101,8 +117,7 @@ func TestFetchGoesByTailcatWhenTheTailnetFails(t *testing.T) {
 	want := randomFile(t, src, 9<<20)
 	fi, _ := os.Stat(src)
 	dir := filepath.Join(f.home, "Reports")
-	// The hello, the open and the first piece go through; then the tailnet
-	// stops answering.
+	// Three questions go through; then the tailnet stops answering.
 	b.failAfter.Store(3)
 	f.startFetch(t, fetchSpec{job: "job-tnfl-0001", src: src, dir: dir, k: "partkey-tnfl-0001", s: fi.Size(), m: fi.ModTime().Unix(), tn: b.tn})
 	v := f.fetchUntil(t, "job-tnfl-0001", finished)
@@ -115,10 +130,82 @@ func TestFetchGoesByTailcatWhenTheTailnetFails(t *testing.T) {
 	if d := roadDials.Load(); d != 1 {
 		t.Fatalf("tailcat dialled %d times", d)
 	}
-	// The rest came by tailcat from the part: the first piece was not asked
-	// for again.
-	if offs := pieceOffsets(); len(offs) == 0 || offs[0] == "0" {
-		t.Fatalf("tailcat's pieces: %v", offs)
+	if offs := pieceOffsets(); len(offs) == 0 {
+		t.Fatal("tailcat was asked for no piece")
+	}
+}
+
+// A road that holds a piece and brings nothing: the other asks for the same
+// piece, brings it, and the held request is ended — the file does not wait
+// for the slow road.
+func TestFetchRacesAPieceTheOtherRoadHolds(t *testing.T) {
+	f := newFetchFixture(t)
+	b := newTnFetchBench(t, f, "")
+	src := filepath.Join(f.home, "Documents", "held.bin")
+	want := randomFile(t, src, 7<<20+5)
+	fi, _ := os.Stat(src)
+	dir := filepath.Join(f.home, "Reports")
+	var held, ended atomic.Int32
+	setRoadHook(func(r *http.Request) error {
+		if r.URL.Path != "/v1/files/file" {
+			return nil
+		}
+		held.Add(1)
+		<-r.Context().Done()
+		ended.Add(1)
+		return r.Context().Err()
+	})
+	t0 := time.Now()
+	f.startFetch(t, fetchSpec{job: "job-held-0001", src: src, dir: dir, k: "partkey-held-0001", s: fi.Size(), m: fi.ModTime().Unix(), tn: b.tn})
+	v := f.fetchUntil(t, "job-held-0001", finished)
+	if v.St != "done" {
+		t.Fatalf("job: %+v", v)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "held.bin")); string(got) != string(want) {
+		t.Fatal("the copy differs")
+	}
+	if took := time.Since(t0); took > fetchPieceIdle/2 {
+		t.Fatalf("the file waited for the held road: %v", took)
+	}
+	if h, e := held.Load(), ended.Load(); h == 0 || e != h {
+		t.Fatalf("tailcat's pieces: %d held, %d ended", h, e)
+	}
+	if b.dials.Load() != 1 {
+		t.Fatalf("tailnet dialled %d times", b.dials.Load())
+	}
+}
+
+// Two roads of uneven pace, pieces arriving out of order: every byte is
+// written once, in order.
+func TestFetchTwoRoadsWriteInOrder(t *testing.T) {
+	f := newFetchFixture(t)
+	b := newTnFetchBench(t, f, "")
+	src := filepath.Join(f.home, "Documents", "uneven.bin")
+	want := randomFile(t, src, 21<<20+12345)
+	fi, _ := os.Stat(src)
+	dir := filepath.Join(f.home, "Reports")
+	var n atomic.Int32
+	setRoadHook(func(r *http.Request) error {
+		if r.URL.Path == "/v1/files/file" {
+			// Now quick, now slow, now and then failing.
+			k := n.Add(1)
+			if k%7 == 0 {
+				return errors.New("the tunnel dropped")
+			}
+			time.Sleep(time.Duration(k%5) * 3 * time.Millisecond)
+		}
+		return nil
+	})
+	f.startFetch(t, fetchSpec{job: "job-unev-0001", src: src, dir: dir, k: "partkey-unev-0001", s: fi.Size(), m: fi.ModTime().Unix(), tn: b.tn})
+	v := f.fetchUntil(t, "job-unev-0001", finished)
+	if v.St != "done" {
+		t.Fatalf("job: %+v", v)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "uneven.bin")); string(got) != string(want) {
+		t.Fatal("the copy differs")
+	}
+	if left := parts(t, dir); len(left) != 0 {
+		t.Fatalf("parts left: %v", left)
 	}
 }
 
