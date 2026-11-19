@@ -559,6 +559,11 @@ func mailboxRefusal(c consoleCmd) string {
 		// The Files tab (files.go): the disks are read over the tunnel the
 		// answers go back on, never through the relay.
 		return "tunnel-only"
+	case "put-key", "put-peer", "put-peers":
+		// The owner's other Macs and their tunnel addresses (put.go): an
+		// address holds the tunnel's pre-shared key, and never goes through
+		// the relay.
+		return "tunnel-only"
 	}
 	return ""
 }
@@ -578,6 +583,14 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 	switch c.Kind {
 	case "esh":
 		return runSealed(c), false
+	case "put-key":
+		// The owner's other Macs, for put (put.go): from the tunnel alone
+		// (mailboxRefusal), under a pinned key.
+		return runPutKey(c), false
+	case "put-peer":
+		return runPutPeer(c), false
+	case "put-peers":
+		return runPutPeers(c), false
 	case "clone":
 		return runClone(c), false
 	case "unclone":

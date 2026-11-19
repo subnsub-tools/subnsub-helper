@@ -183,6 +183,10 @@ const (
 	// to the page's viewer (helper screen.go). The console's switch and a
 	// pinned key, to an allowlisted browser; MON_SCREEN=off turns it off.
 	CapScreen = "screen"
+	// CapPut: put, the voice-typing app, runs here and reaches put on the
+	// owner's other Macs through this helper (main package, put.go); the
+	// page asks put-key and sends the list of those Macs.
+	CapPut = "put"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on

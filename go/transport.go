@@ -261,6 +261,8 @@ func connect(base, token string) {
 	startSysSampler()
 	startProbes()
 	startCustom()
+	// put on this Mac and the owner's other Macs (put.go).
+	startPutSocket()
 	startSpaces(base, tok)
 	startIPv4()
 	// And the reach record's probe (reach.go): idle until a push fails.

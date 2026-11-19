@@ -420,6 +420,7 @@ func runDirect(ctx context.Context) {
 	startSysSampler()
 	startProbes()
 	startCustom()
+	startPutSocket()
 	startIPv4()
 	go runTailnet(ctx)
 	musicStart()
@@ -450,11 +451,11 @@ func runDirect(ctx context.Context) {
 			StateDir:   conf,
 			DERPMapURL: derpMapURL(),
 			Port:       directPort,
-			// The file, the portable copies still current (clone.go) and
-			// the read-only grants another computer is copying under
-			// (filesgrant.go).
+			// The file, the portable copies still current (clone.go), the
+			// read-only grants another computer is copying under
+			// (filesgrant.go) and the owner's other Macs, for put (put.go).
 			Allowed: func() []key.NodePublic {
-				return append(append(loadAllowedClients(), activeCloneNodes()...), activeGrantNodes()...)
+				return append(append(append(loadAllowedClients(), activeCloneNodes()...), activeGrantNodes()...), activePutNodes()...)
 			},
 			Handler: h,
 		})
@@ -523,7 +524,7 @@ func serveDirect(ctx context.Context, tc *transport.Tailcat) {
 					warnf("direct: allowed a new browser")
 				}
 			}
-			for _, k := range append(activeCloneNodes(), activeGrantNodes()...) {
+			for _, k := range append(append(activeCloneNodes(), activeGrantNodes()...), activePutNodes()...) {
 				if !tc.Known(k) {
 					tc.AddAllowed(k)
 				}
@@ -648,6 +649,12 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// paths and nothing the mux would answer anyone else.
 		if len(grantsForNode(k, time.Now())) > 0 {
 			h.grantServe(w, r, k)
+			return
+		}
+		// One of the owner's other Macs, for put (put.go): its stream to put
+		// here, and nothing else.
+		if p, ok := putPeerForNode(k); ok {
+			h.putServe(w, r, p)
 			return
 		}
 		h.refuse(w, http.StatusForbidden, "not-allowed")
@@ -796,6 +803,12 @@ func directCapsFor(r *http.Request) []string {
 				// pinned.
 				if screenEnabled() && loadTrust().sealed {
 					caps = append(caps, transport.CapScreen)
+				}
+				// put on this Mac reaching put on the owner's other Macs
+				// (put.go): where put runs and a key is pinned, the list
+				// coming from the browsers on the list alone.
+				if putSupported && loadTrust().sealed {
+					caps = append(caps, transport.CapPut)
 				}
 				if music {
 					caps = append(caps, transport.CapMusic)

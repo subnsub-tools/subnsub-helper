@@ -41,8 +41,8 @@ var detailPhrases = map[string]string{
 	"cli-timeout": "{a} timed out",
 	"cli-failed":  "{a} could not be run",
 	"cli-exit":    "{a} exited with a non-zero status",
-	"cli-shape":   "{a} answered in a shape this build does not recognise",
-	"cli-nolines": "{a} printed no quota line this build recognises",
+	"cli-shape":   "{a} answered in a shape this build does not recognize",
+	"cli-nolines": "{a} printed no quota line this build recognizes",
 	"cli-signin":  "run {a} once to sign in",
 
 	// Credential files the vendor's own tool wrote. {a} is the path for
@@ -59,7 +59,7 @@ var detailPhrases = map[string]string{
 	"http-429":      "the endpoint is rate limiting (429)",
 	"http-status":   "the endpoint answered {a}",
 	"http-redirect": "the endpoint tried to redirect",
-	"http-shape":    "the endpoint answered in a shape this build does not recognise",
+	"http-shape":    "the endpoint answered in a shape this build does not recognize",
 	"http-parse":    "the response could not be parsed",
 	"rate-hold":     "the quota endpoint is rate limiting; this backs off and retries",
 
@@ -85,7 +85,7 @@ var detailPhrases = map[string]string{
 	"cpa-down":       "no CLI Proxy API answered at the configured address",
 	"cpa-key":        "the CLI Proxy API refused the management key",
 	"cpa-off":        "the CLI Proxy API's management API is switched off (404)",
-	"cpa-shape":      "the CLI Proxy API answered in a shape this build does not recognise",
+	"cpa-shape":      "the CLI Proxy API answered in a shape this build does not recognize",
 	"cpa-cred-field": "the credential lists no {a}, which the quota endpoint needs",
 	"adapter-host":   "the quota adapter names {a}, which is outside this build's allow-list",
 
