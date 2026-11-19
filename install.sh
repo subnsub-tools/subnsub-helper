@@ -566,7 +566,7 @@ if [ ! -d "$conf" ] && [ -d "$HOME/.config/$OLD_NAME" ] && [ ! -L "$HOME/.config
       Linux|Darwin) ;;
       *)
         _run=$(ps axwwo args= 2>/dev/null | while read -r _a; do
-            case "$_a" in "$_ob connect"|"$_ob connect "*) echo yes ;; esac
+            case "$_a" in ("$_ob connect"|"$_ob connect "*) echo yes ;; esac
         done)
         [ -z "$_run" ] || die "$_ob is running. Stop it first (and whatever starts it, such as a daemon(8) line or an rc.d script), then run this again"
         ;;
