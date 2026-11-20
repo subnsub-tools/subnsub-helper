@@ -11,8 +11,10 @@ package main
 // decided where every other grant here is decided: by a key this machine has
 // pinned. A page learns a Mac's keys from put-key, which carries no secret and
 // is answered only under a signature this Mac verifies, and it hands out
-// addresses only among the Macs that answered. put itself pairs nothing,
-// scans nothing and needs no Tailscale.
+// addresses only among the Macs that answered. put-key also says whether put
+// is on this Mac (putPresence): a Mac without it is named to no other, and is
+// taken off the lists that hold it. put itself pairs nothing, scans nothing
+// and needs no Tailscale.
 //
 // ONE KEY PER DESTINATION: this Mac dials each peer from a key of its own,
 // derived from a seed (put-seed, 0600) and the peer's agent id. One key in two
@@ -65,6 +67,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -100,6 +104,49 @@ var putAgentRE = regexp.MustCompile(`^[A-Za-z0-9_-]{4,40}$`)
 
 // Where put runs at all; a test turns it on elsewhere.
 var putSupported = runtime.GOOS == "darwin"
+
+// Where put is installed: its install line and its updater keep it in
+// Applications. A test points it elsewhere.
+var putAppPaths = func() []string {
+	paths := []string{"/Applications/put.app"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, "Applications", "put.app"))
+	}
+	return paths
+}
+
+// putSeen: put on this Mac has asked this helper something since it started.
+var putSeen atomic.Bool
+
+// putPresence says whether put is on this Mac: its app is in Applications,
+// or it has asked this helper something since it started. Every helper on a
+// Mac can carry put (the put cap in hello); put-key also says whether put is
+// there, so a page or a primary names to the owner's other Macs only the
+// Macs that have it, and takes a Mac off their lists once its helper says
+// it has not. A helper is asked at every sweep, so this is always current,
+// where a hello is read once per connection. An error when it cannot be told
+// (a lookup failed other than by the app not being there): "not here" then
+// would take this Mac off every list.
+func putPresence() (bool, error) {
+	if !putSupported {
+		return false, nil
+	}
+	if putSeen.Load() {
+		return true, nil
+	}
+	var failed error
+	for _, p := range putAppPaths() {
+		fi, err := os.Stat(p)
+		switch {
+		case err == nil && fi.IsDir():
+			return true, nil
+		case err == nil, os.IsNotExist(err), errors.Is(err, syscall.ENOTDIR):
+		default:
+			failed = err
+		}
+	}
+	return false, failed
+}
 
 // putPeer is one of the owner's other Macs as the page described it.
 type putPeer struct {
@@ -312,10 +359,17 @@ func runPutKey(c consoleCmd) consoleResult {
 		res.Error = "bad-args"
 		return res
 	}
+	present, err := putPresence()
+	if err != nil {
+		res.Error = "unavailable"
+		return res
+	}
 	keys := map[string]string{}
 	self := agentID()
 	for _, d := range dests {
-		if !putAgentRE.MatchString(d) || d == self {
+		// Without put this Mac dials no one, so it gives no key: a page or a
+		// primary too old to read "present" cannot name it to the others.
+		if !present || !putAgentRE.MatchString(d) || d == self {
 			continue
 		}
 		priv, err := putKeyFor(d)
@@ -330,7 +384,7 @@ func runPutKey(c consoleCmd) consoleResult {
 	for _, p := range putPeers() {
 		held[p.Agent] = putEntryDigest(p)
 	}
-	b, _ := json.Marshal(map[string]any{"keys": keys, "held": held})
+	b, _ := json.Marshal(map[string]any{"keys": keys, "held": held, "present": present})
 	res.Code, res.Out = 0, string(b)
 	return res
 }
@@ -758,6 +812,12 @@ func servePutLocal(c net.Conn) {
 		putAnswer(c, map[string]any{"ok": false, "error": "bad-frame"})
 		c.Close()
 		return
+	}
+	// Only the user's own programs reach this socket, and put asks these: it
+	// is on this Mac. A hint rather than proof of the app, as the socket is.
+	switch ask.Op {
+	case "peers", "open", "accept":
+		putSeen.Store(true)
 	}
 	switch ask.Op {
 	case "peers":

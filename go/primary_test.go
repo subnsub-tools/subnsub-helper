@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -34,12 +35,15 @@ type primaryFixture struct {
 
 func newPrimaryFixture(t *testing.T) *primaryFixture {
 	t.Helper()
-	scratchHome(t)
-	was := putSupported
+	home := scratchHome(t)
+	was, wasPaths := putSupported, putAppPaths
 	putSupported = true
+	putAppPaths = func() []string { return []string{filepath.Join(home, "Applications", "put.app")} }
 	putReset()
 	primaryReset()
-	t.Cleanup(func() { putSupported = was; putReset(); primaryReset() })
+	// The primary is a Mac put is on, as in the fleet; a test says otherwise.
+	putSeen.Store(true)
+	t.Cleanup(func() { putSupported, putAppPaths = was, wasPaths; putReset(); primaryReset() })
 	f := &primaryFixture{h: newDirectHandler(), brows: key.NewNode().Public()}
 	if err := allowClient(f.brows.String()); err != nil {
 		t.Fatal(err)
@@ -58,6 +62,9 @@ func primaryReset() {
 	primaryKnown.Lock()
 	primaryKnown.m = nil
 	primaryKnown.Unlock()
+	primaryAbsent.Lock()
+	primaryAbsent.m = nil
+	primaryAbsent.Unlock()
 	primaryLinkCache.Lock()
 	primaryLinkCache.m = nil
 	primaryLinkCache.Unlock()
@@ -669,6 +676,133 @@ func TestPrimaryRound(t *testing.T) {
 	}
 	if !foundAA {
 		t.Fatalf("memberAA's entry did not reach the primary's own put list: %+v", putPeers())
+	}
+}
+
+// A member whose put-key says put is not on it is no source — its entry goes
+// to no one, the primary's own list included — and every member holding its
+// entry gets an empty put-peer for it. A member that does not say (an older
+// helper) counts as having put.
+func TestPrimaryRoundAbsent(t *testing.T) {
+	f := newPrimaryFixture(t)
+	f.primaryOn(t)
+	self := agentID()
+	f.command(t, "primary-roster", "", rosterJSON(t,
+		rosterMember(self, "This Mac", testPutAddr(t)),
+		rosterMember("memberAA", "Member A", testPutAddr(t)),
+		rosterMember("memberBB", "Member B", testPutAddr(t)),
+	))
+	fa := &fakeMemberConn{agent: "memberAA", caps: []string{transport.CapPut}}
+	fa.putKey = `{"keys":{},"held":{"memberBB":"0123456789abcdef"}}`
+	fb := &fakeMemberConn{agent: "memberBB", caps: []string{transport.CapPut}}
+	fb.putKey = `{"keys":{"` + self + `":"` + key.NewNode().Public().String() + `","memberAA":"` + key.NewNode().Public().String() + `"},"held":{},"present":false}`
+	withFakeMembers(t, map[string]*fakeMemberConn{"memberAA": fa, "memberBB": fb})
+
+	primaryRound(context.Background())
+
+	var drops, pushesOfB int
+	for _, c := range fa.recorded() {
+		if c.kind == "put-peer" && c.target == "memberBB" {
+			if c.cmd == "" {
+				drops++
+			} else {
+				pushesOfB++
+			}
+		}
+	}
+	if drops != 1 || pushesOfB != 0 {
+		t.Fatalf("memberAA: %d drops and %d pushes of memberBB: %+v", drops, pushesOfB, fa.recorded())
+	}
+	for _, p := range putPeers() {
+		if p.Agent == "memberBB" {
+			t.Fatalf("memberBB reached the primary's own list: %+v", putPeers())
+		}
+	}
+	// It is still a target: it gets the primary's entry like any member.
+	gotSelf := false
+	for _, c := range fb.recorded() {
+		gotSelf = gotSelf || (c.kind == "put-peer" && c.target == self && c.cmd != "")
+	}
+	if !gotSelf {
+		t.Fatalf("memberBB no longer gets the others' entries: %+v", fb.recorded())
+	}
+
+	// Once its helper says put is there, it is a source again.
+	fb.mu.Lock()
+	fb.putKey = strings.Replace(fb.putKey, `"present":false`, `"present":true`, 1)
+	fb.cmds = nil
+	fb.mu.Unlock()
+	primaryRound(context.Background())
+	back := false
+	for _, p := range putPeers() {
+		back = back || p.Agent == "memberBB"
+	}
+	if !back {
+		t.Fatalf("memberBB did not come back to the primary's own list: %+v", putPeers())
+	}
+
+	// The primary itself without put: its own entry is taken off the members that hold it.
+	putSeen.Store(false)
+	fa.mu.Lock()
+	fa.putKey = `{"keys":{},"held":{"` + self + `":"0123456789abcdef"}}`
+	fa.cmds = nil
+	fa.mu.Unlock()
+	primaryRound(context.Background())
+	selfDropped := false
+	for _, c := range fa.recorded() {
+		selfDropped = selfDropped || (c.kind == "put-peer" && c.target == self && c.cmd == "")
+	}
+	if !selfDropped {
+		t.Fatalf("the primary without put was not taken off memberAA: %+v", fa.recorded())
+	}
+}
+
+// A member offline when another said put is not on it is told to drop that
+// one once it is back, even if that one is offline by then; a present answer
+// ends it.
+func TestPrimaryRoundAbsentRemembered(t *testing.T) {
+	f := newPrimaryFixture(t)
+	f.primaryOn(t)
+	f.command(t, "primary-roster", "", rosterJSON(t,
+		rosterMember(agentID(), "This Mac", testPutAddr(t)),
+		rosterMember("memberBB", "Member B", testPutAddr(t)),
+		rosterMember("memberCC", "Member C", testPutAddr(t)),
+	))
+	fb := &fakeMemberConn{agent: "memberBB", caps: []string{transport.CapPut}, putKey: `{"keys":{},"held":{},"present":false}`}
+	fc := &fakeMemberConn{agent: "memberCC", caps: []string{transport.CapPut}, helloErr: errors.New("offline"),
+		putKey: `{"keys":{},"held":{"memberBB":"0123456789abcdef"}}`}
+	withFakeMembers(t, map[string]*fakeMemberConn{"memberBB": fb, "memberCC": fc})
+	primaryRound(context.Background())
+
+	fb.mu.Lock()
+	fb.helloErr = errors.New("offline")
+	fb.mu.Unlock()
+	fc.mu.Lock()
+	fc.helloErr = nil
+	fc.mu.Unlock()
+	primaryRound(context.Background())
+	drops := 0
+	for _, c := range fc.recorded() {
+		if c.kind == "put-peer" && c.target == "memberBB" && c.cmd == "" {
+			drops++
+		}
+	}
+	if drops != 1 {
+		t.Fatalf("memberCC, back, was not told to drop memberBB: %+v", fc.recorded())
+	}
+
+	fb.mu.Lock()
+	fb.helloErr = nil
+	fb.putKey = `{"keys":{},"held":{},"present":true}`
+	fb.mu.Unlock()
+	fc.mu.Lock()
+	fc.cmds = nil
+	fc.mu.Unlock()
+	primaryRound(context.Background())
+	for _, c := range fc.recorded() {
+		if c.kind == "put-peer" && c.target == "memberBB" && c.cmd == "" {
+			t.Fatalf("memberBB is dropped after its helper said put is there: %+v", fc.recorded())
+		}
 	}
 }
 

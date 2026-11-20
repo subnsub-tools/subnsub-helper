@@ -35,10 +35,12 @@ type putFixture struct {
 func newPutFixture(t *testing.T) *putFixture {
 	t.Helper()
 	home := scratchHome(t)
-	was := putSupported
+	was, wasPaths := putSupported, putAppPaths
 	putSupported = true
+	// put's app is looked for in this test's home only, never the machine's.
+	putAppPaths = func() []string { return []string{filepath.Join(home, "Applications", "put.app")} }
 	putReset()
-	t.Cleanup(func() { putSupported = was; putReset() })
+	t.Cleanup(func() { putSupported, putAppPaths = was, wasPaths; putReset() })
 	f := &putFixture{home: home, h: newDirectHandler(), browser: key.NewNode().Public()}
 	if err := allowClient(f.browser.String()); err != nil {
 		t.Fatal(err)
@@ -53,6 +55,7 @@ func newPutFixture(t *testing.T) *putFixture {
 
 // putReset forgets what an earlier test left in the process.
 func putReset() {
+	putSeen.Store(false)
 	putState.Lock()
 	putState.loaded, putState.peers = false, nil
 	putState.Unlock()
@@ -192,7 +195,9 @@ func TestPutPeerCommands(t *testing.T) {
 	}
 
 	// put-key: the key this Mac dials each named Mac from, one of its own for
-	// each, and the digest of each entry held; never an address.
+	// each, and the digest of each entry held; never an address. put is on
+	// this Mac here (TestPutPresent covers a Mac without it).
+	putSeen.Store(true)
 	r = f.command(t, "put-key", "", `["macStudy01","macOffice1","`+agentID()+`","bad id"]`)
 	var got struct {
 		Keys map[string]string `json:"keys"`
@@ -376,6 +381,67 @@ func dialPut(t *testing.T, ask string) (net.Conn, *bufio.Reader, map[string]any)
 	var out map[string]any
 	json.Unmarshal([]byte(line), &out)
 	return c, r, out
+}
+
+// put-key says whether put is on this Mac: its app in Applications, or put
+// having asked something on put.sock since the helper started. The put cap in
+// hello says only that this Mac can carry put, so it does not depend on it.
+// Without put, put-key gives no dial keys; when it cannot tell, it fails.
+func TestPutPresent(t *testing.T) {
+	f := newPutFixture(t)
+	ask := func() map[string]any {
+		t.Helper()
+		r := f.command(t, "put-key", "", `["macStudy01"]`)
+		var got map[string]any
+		if r.Code != 0 || json.Unmarshal([]byte(r.Out), &got) != nil {
+			t.Fatalf("put-key: %+v", r)
+		}
+		return got
+	}
+	keys := func(got map[string]any) int { k, _ := got["keys"].(map[string]any); return len(k) }
+	if got := ask(); got["present"] != false || keys(got) != 0 {
+		t.Fatalf("no app and no word from put: %v", got)
+	}
+	app := filepath.Join(f.home, "Applications", "put.app")
+	if err := os.MkdirAll(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := ask(); got["present"] != true || keys(got) != 1 {
+		t.Fatalf("put's app in Applications: %v", got)
+	}
+	os.RemoveAll(app)
+	if got := ask(); got["present"] != false {
+		t.Fatalf("put still counted after its app is gone: %v", got)
+	}
+	// A lookup that fails other than by the app not being there tells
+	// nothing: put-key fails rather than say put is not here.
+	if os.Geteuid() != 0 {
+		dir := filepath.Join(f.home, "Applications")
+		os.Chmod(dir, 0)
+		r := f.command(t, "put-key", "", `["macStudy01"]`)
+		os.Chmod(dir, 0o755)
+		if r.Code == 0 || r.Error != "unavailable" {
+			t.Fatalf("an unreadable Applications: %+v", r)
+		}
+	}
+	putLocal.Lock()
+	putLocal.on = false
+	putLocal.Unlock()
+	startPutSocket()
+	c, _, _ := dialPut(t, `{"op":"fly"}`)
+	c.Close()
+	if got := ask(); got["present"] != false {
+		t.Fatalf("a request put does not make counted as put: %v", got)
+	}
+	c, _, _ = dialPut(t, `{"op":"peers"}`)
+	c.Close()
+	if got := ask(); got["present"] != true || keys(got) != 1 {
+		t.Fatalf("put asking on put.sock: %v", got)
+	}
+	putSupported = false
+	if present, _ := putPresence(); present {
+		t.Fatal("put is said to be where it cannot run")
+	}
 }
 
 func TestPutLocalSocket(t *testing.T) {

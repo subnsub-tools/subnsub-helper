@@ -1148,6 +1148,18 @@ func primaryReapConns() {
 	}
 }
 
+// primaryAbsent: the members whose helper said put is not on them, by
+// roster identity (addr and kid), kept between rounds so a member that was
+// offline then is still told to drop them when it is back, whether or not
+// they are online by then. A present answer, or a change of identity, clears
+// one. The page keeps the same (putAbsent).
+var primaryAbsent = struct {
+	sync.Mutex
+	m map[string]primaryAbsentEntry
+}{}
+
+type primaryAbsentEntry struct{ addr, kid string }
+
 // primaryKnown mirrors the page's putKnown: per-member put-key answers
 // kept between rounds, pruned to the roster (agent present, same addr and
 // kid) exactly as the page prunes to its listed machines.
@@ -1168,6 +1180,7 @@ type sweepLink struct {
 	self                   bool
 	put                    bool // hello said put (self: putSupported)
 	answered               bool // put-key succeeded this round
+	absent                 bool // put-key said put is not on that Mac
 	keys, held             map[string]string
 }
 
@@ -1207,13 +1220,16 @@ func primaryPutKey(ctx context.Context, l *sweepLink, dests []string) bool {
 		out = r.Out
 	}
 	var po struct {
-		Keys map[string]string `json:"keys"`
-		Held map[string]string `json:"held"`
+		Keys    map[string]string `json:"keys"`
+		Held    map[string]string `json:"held"`
+		Present *bool             `json:"present"`
 	}
 	if json.Unmarshal([]byte(out), &po) != nil {
 		return false
 	}
 	l.keys, l.held = po.Keys, po.Held
+	// A helper older than putPresence does not say, and counts as having put.
+	l.absent = po.Present != nil && !*po.Present
 	return true
 }
 
@@ -1300,7 +1316,12 @@ func primaryRound(ctx context.Context) {
 		}
 	}
 	for _, l := range links {
-		if !l.answered {
+		if l.absent {
+			// No source while put is not there; the pushes bring it back
+			// once its helper says put is.
+			delete(primaryKnown.m, l.agent)
+		}
+		if !l.answered || l.absent {
 			continue
 		}
 		e := primaryKnown.m[l.agent]
@@ -1318,6 +1339,28 @@ func primaryRound(ctx context.Context) {
 		sources = append(sources, e)
 	}
 	primaryKnown.Unlock()
+	primaryAbsent.Lock()
+	if primaryAbsent.m == nil {
+		primaryAbsent.m = map[string]primaryAbsentEntry{}
+	}
+	for agent, e := range primaryAbsent.m {
+		m, ok := inRoster[agent]
+		if !ok || m.Addr != e.addr || m.Kid != e.kid {
+			delete(primaryAbsent.m, agent)
+		}
+	}
+	for _, l := range links {
+		if l.answered && l.absent {
+			primaryAbsent.m[l.agent] = primaryAbsentEntry{addr: l.addr, kid: l.kid}
+		} else if l.answered {
+			delete(primaryAbsent.m, l.agent)
+		}
+	}
+	absent := make([]string, 0, len(primaryAbsent.m))
+	for agent := range primaryAbsent.m {
+		absent = append(absent, agent)
+	}
+	primaryAbsent.Unlock()
 	// put-peer pushes: for each answered target, every known source's entry.
 	for _, t := range links {
 		if !t.answered {
@@ -1337,6 +1380,25 @@ func primaryRound(ctx context.Context) {
 			}
 			b, _ := json.Marshal(map[string]string{"n": s.name, "a": s.addr, "k": key})
 			if !primaryPutPeer(ctx, t, s.agent, string(b)) {
+				break
+			}
+		}
+	}
+	// A member whose helper said put is not on it is taken off every
+	// answered member's list that holds it (an empty put-peer): a Mac without
+	// put is no Mac to send text to.
+	for _, t := range links {
+		if !t.answered {
+			continue
+		}
+		for _, gone := range absent {
+			if gone == t.agent {
+				continue
+			}
+			if _, held := t.held[gone]; !held {
+				continue
+			}
+			if !primaryPutPeer(ctx, t, gone, "") {
 				break
 			}
 		}

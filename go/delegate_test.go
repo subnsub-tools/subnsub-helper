@@ -238,6 +238,7 @@ func TestDelegatedCommandRuns(t *testing.T) {
 	was := putSupported
 	putSupported = true
 	putReset()
+	putSeen.Store(true) // put is on this Mac, so put-key gives its keys
 	t.Cleanup(func() { putSupported = was; putReset() })
 	res := f.command(t, f.dpriv, "put-key", "", `["agentB01"]`)
 	if res.Code != 0 {
