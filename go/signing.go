@@ -119,6 +119,11 @@ func trustedKeysPath() string {
 type trust struct {
 	keys   []ed25519.PublicKey
 	sealed bool
+	// delegated are the primary helpers' signing keys (delegated-keys,
+	// delegate.go): they verify only the coordination kinds in
+	// delegatedKinds, and their presence seals nothing — sealed stays
+	// trusted-keys alone.
+	delegated []ed25519.PublicKey
 }
 
 // Read on every command rather than cached, for the same reason the console
@@ -138,16 +143,19 @@ type trust struct {
 // empty file is how `untrust` removes the last key, and it says so when it
 // does.
 func loadTrust() trust {
+	// Delegated keys ride along on every outcome: a member can hold a
+	// primary's delegation with no trusted-keys file at all.
+	delegated := delegatedPublicKeys()
 	path := trustedKeysPath()
 	if path == "" {
-		return trust{}
+		return trust{delegated: delegated}
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return trust{}
+			return trust{delegated: delegated}
 		}
-		return trust{sealed: true}
+		return trust{sealed: true, delegated: delegated}
 	}
 	var out []ed25519.PublicKey
 	content := false
@@ -159,7 +167,7 @@ func loadTrust() trust {
 			out = append(out, k)
 		}
 	}
-	return trust{keys: out, sealed: len(out) > 0 || content}
+	return trust{keys: out, sealed: len(out) > 0 || content, delegated: delegated}
 }
 
 // One key from one line, or nil. Comments and blanks are skipped so the file
@@ -267,6 +275,20 @@ func verifyCommand(c consoleCmd, agent string, t trust, now time.Time) string {
 		}
 	}
 	if !ok {
+		// A delegated (primary) signature counts only for the coordination
+		// kinds — everything else is refused as not-delegated rather than
+		// bad-signature, so the dashboard can say which trust is missing.
+		for _, k := range t.delegated {
+			if ed25519.Verify(k, msg, sig) {
+				if !delegatedKind(c.Kind) {
+					return "not-delegated"
+				}
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
 		return "bad-signature"
 	}
 	// Last, because a replay of something that never verified is not worth
@@ -291,6 +313,18 @@ func commandSigner(c consoleCmd, agent string, t trust) ed25519.PublicKey {
 	}
 	return nil
 }
+
+// delegatedKinds are the only kinds a delegated key's signature may run —
+// the coordination set (primary.go, delegate.go) and nothing that touches
+// the console, the machine's own grants, or its files. A kind absent here
+// is refused not-delegated even when the signature verifies.
+var delegatedKinds = map[string]bool{
+	"put-key": true, "put-peer": true, "put-peers": true,
+	"rename": true, "update": true,
+	"refresh": true, "inspect": true, "myip": true,
+}
+
+func delegatedKind(kind string) bool { return delegatedKinds[kind] }
 
 // trustsKey reports whether k is pinned on this machine right now.
 func trustsKey(k ed25519.PublicKey) bool {

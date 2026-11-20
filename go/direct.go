@@ -453,9 +453,11 @@ func runDirect(ctx context.Context) {
 			Port:       directPort,
 			// The file, the portable copies still current (clone.go), the
 			// read-only grants another computer is copying under
-			// (filesgrant.go) and the owner's other Macs, for put (put.go).
+			// (filesgrant.go), the owner's other Macs, for put (put.go),
+			// the live join tickets of a primary (primary.go), and the
+			// coordinators' tunnel keys (delegate.go).
 			Allowed: func() []key.NodePublic {
-				return append(append(append(loadAllowedClients(), activeCloneNodes()...), activeGrantNodes()...), activePutNodes()...)
+				return append(append(append(append(append(loadAllowedClients(), activeCloneNodes()...), activeGrantNodes()...), activePutNodes()...), activeJoinNodes()...), activeDelegateNodes()...)
 			},
 			Handler: h,
 		})
@@ -488,6 +490,12 @@ func runDirect(ctx context.Context) {
 		// long as this carrier lives: the address it hands over is this one.
 		pctx, pcancel := context.WithCancel(ctx)
 		go runPairing(pctx, conf, tc)
+		// A member still holding an installer-written primary-join file
+		// dials the primary with its ticket key; and while this machine IS
+		// the primary, the coordinator keeps the roster's put lists in
+		// step (primary.go).
+		go runPrimaryJoin(pctx, conf)
+		go runPrimaryCoordinator(pctx)
 		serveDirect(ctx, tc)
 		pcancel()
 		setDirectProbe(nil)
@@ -524,7 +532,7 @@ func serveDirect(ctx context.Context, tc *transport.Tailcat) {
 					warnf("direct: allowed a new browser")
 				}
 			}
-			for _, k := range append(append(activeCloneNodes(), activeGrantNodes()...), activePutNodes()...) {
+			for _, k := range append(append(append(append(activeCloneNodes(), activeGrantNodes()...), activePutNodes()...), activeJoinNodes()...), activeDelegateNodes()...) {
 				if !tc.Known(k) {
 					tc.AddAllowed(k)
 				}
@@ -628,7 +636,8 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/command", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close", "/v1/files/put",
 		"/v1/screen/in", "/v1/screen/beat", "/v1/screen/close",
-		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done", "/v1/speed/up":
+		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done", "/v1/speed/up",
+		"/v1/primary/join":
 		if r.Method != http.MethodPost {
 			h.refuse(w, http.StatusMethodNotAllowed, "unknown-frame")
 			return
@@ -655,6 +664,25 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// here, and nothing else.
 		if p, ok := putPeerForNode(k); ok {
 			h.putServe(w, r, p)
+			return
+		}
+		// A ticket's join key, for the one path a primary lets it reach
+		// (primary.go): the join door consumes the ticket.
+		if ticket, ok := primaryJoinForNode(k); ok {
+			h.primaryJoinServe(w, r, ticket)
+			return
+		}
+		// A coordinator's key (delegate.go): the hello and the command
+		// door, where its delegated signature is judged — nothing else
+		// the mux would answer a browser. delegated-keys is read per
+		// request, so a replaced or removed node is refused at once.
+		if delegatedPeer(k) {
+			if r.Method == http.MethodGet && r.URL.Path == "/v1/hello" ||
+				r.Method == http.MethodPost && r.URL.Path == "/v1/command" {
+				h.mux.ServeHTTP(w, r)
+				return
+			}
+			h.refuse(w, http.StatusForbidden, "not-allowed")
 			return
 		}
 		h.refuse(w, http.StatusForbidden, "not-allowed")
@@ -810,6 +838,12 @@ func directCapsFor(r *http.Request) []string {
 				if putSupported && loadTrust().sealed {
 					caps = append(caps, transport.CapPut)
 				}
+				// The primary pair (primary.go, delegate.go): this machine
+				// coordinates, or accepts a coordinator's signature for
+				// the coordination kinds — wherever a key is pinned.
+				if loadTrust().sealed {
+					caps = append(caps, transport.CapPrimary, transport.CapDelegate)
+				}
 				if music {
 					caps = append(caps, transport.CapMusic)
 				}
@@ -834,6 +868,14 @@ func directCapsFor(r *http.Request) []string {
 				}
 				return caps
 			}
+		}
+		// A coordinator's key (delegate.go) gets put's list and the
+		// coordination pair — nothing a browser's key reaches.
+		if delegatedPeer(k) && loadTrust().sealed {
+			if putSupported {
+				caps = append(caps, transport.CapPut)
+			}
+			caps = append(caps, transport.CapPrimary, transport.CapDelegate)
 		}
 	}
 	return caps
@@ -1061,6 +1103,7 @@ func (h *directHandler) helloFrame(r *http.Request) ([]byte, error) {
 		Caps:          directCapsFor(r),
 		Carrier:       carrier,
 		Tailnet:       tailnetRoadNow(),
+		Primary:       primaryIsPrimary(),
 	})
 	if err != nil {
 		return nil, err

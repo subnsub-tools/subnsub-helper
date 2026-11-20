@@ -187,6 +187,14 @@ const (
 	// owner's other Macs through this helper (main package, put.go); the
 	// page asks put-key and sends the list of those Macs.
 	CapPut = "put"
+	// CapPrimary: this machine coordinates the owner's helpers — it holds
+	// the primary signing key and signs the limited set of kinds members
+	// accept from it (main package, primary.go).
+	CapPrimary = "primary"
+	// CapDelegate: this machine accepts commands signed by a delegated key
+	// — a primary's — for the coordination kinds only (main package,
+	// delegate.go, signing.go delegatedKinds).
+	CapDelegate = "delegate"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on
@@ -219,6 +227,10 @@ type Hello struct {
 	// for a reader to reach it without the tunnel (main package, tailnet.go).
 	// Absent when Tailscale is not up here.
 	Tailnet *TailnetRoad `json:"tailnet,omitempty"`
+	// Primary is true when this machine IS a primary helper — its
+	// primary-sign file exists — so a member knows it can enroll with it
+	// and be coordinated by it (main package, primary.go).
+	Primary bool `json:"primary,omitempty"`
 }
 
 // TailnetRoad names the machine's listener on its Tailscale network. Host is

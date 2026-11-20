@@ -73,6 +73,18 @@
 # in a line. Until the pairing is done, treat the line like a password: whoever
 # runs it first is the machine that page will show.
 #
+# PRIMARY — a line from the Monitor page that names a primary helper adds
+# --primary <token>: four dot-separated fields — the primary's signing key
+# in base64, the tunnel key it dials this machine from, a one-time join key,
+# and the primary's tunnel address. The machine pins the signing key for the
+# coordination commands only (never the console's), holds the coordinator's
+# tunnel key in delegated-keys — it reaches the hello and command doors
+# alone — and keeps the join key in primary-join until the
+# join lands or the ticket dies. Like --pair, treat the line like a password
+# until it has run.
+#
+#   curl -fsSL .../install.sh | sh -s -- --direct --primary <token>
+#
 # MUSIC — add --music to a --direct line and the browsers on this machine's
 # direct allowlist can play the music in the folders named with
 # --music-dir PATH (which may be given more than once), or chosen later on
@@ -402,6 +414,12 @@ uninstall_one() {
           "$HOME/.config/$NAME/clones" "$HOME/.config/$NAME/clones.new" \
           "$HOME/.config/$NAME/clone-access" "$HOME/.config/$NAME/clone-access.new" \
           "$HOME/.config/$NAME/pairing" "$HOME/.config/$NAME/pairing.new" \
+          "$HOME/.config/$NAME/primary-sign" "$HOME/.config/$NAME/primary-seed" \
+          "$HOME/.config/$NAME/primary-roster" "$HOME/.config/$NAME/primary-roster.new" \
+          "$HOME/.config/$NAME/primary-tickets" "$HOME/.config/$NAME/primary-tickets.new" \
+          "$HOME/.config/$NAME/primary-join" "$HOME/.config/$NAME/primary-join.new" \
+          "$HOME/.config/$NAME/primary-drops" "$HOME/.config/$NAME/primary-drops.new" \
+          "$HOME/.config/$NAME/delegated-keys" "$HOME/.config/$NAME/delegated-keys.new" \
           "$HOME/.config/$NAME/update-github-down" \
           "$HOME/.config/$NAME/pty-keep"
     # The terminal sessions' sockets. Each holder looks for its own every few
@@ -470,6 +488,9 @@ DERPMAP_ARG="${MON_DERPMAP:-}"
 # The self-hosted page's pairing token (helper/go/pairing.go): for the last
 # --allow key on the line, the browser that made it.
 PAIR_ARG=""
+# A primary helper's join token (helper/go/primary.go): four dot-separated
+# fields — signing key, coordinator node key, join node key, tunnel address.
+PRIMARY_ARG=""
 # Music (go/music.go): whether this machine shares its music with the
 # browsers on its allowlist, and the folders it shares. Folders are kept one
 # to a line, since a path may hold spaces.
@@ -490,6 +511,8 @@ while [ $# -gt 0 ]; do
       --derpmap=*) DERPMAP_ARG=${1#--derpmap=}; shift ;;
       --pair) [ $# -ge 2 ] || die "--pair needs a pairing token"; PAIR_ARG=$2; shift 2 ;;
       --pair=*) PAIR_ARG=${1#--pair=}; shift ;;
+      --primary) [ $# -ge 2 ] || die "--primary needs a token"; PRIMARY_ARG=$2; shift 2 ;;
+      --primary=*) PRIMARY_ARG=${1#--primary=}; shift ;;
       --music) MUSIC_ARG=on; shift ;;
       --music=on|--music=yes|--music=1) MUSIC_ARG=on; shift ;;
       --music=off|--music=no|--music=0) MUSIC_ARG=off; shift ;;
@@ -586,7 +609,7 @@ DIRECT_ON=no
 # the tunnel never consults is a switch that looks set.
 if [ -z "$TOKEN" ] && [ "$DIRECT_ON" != yes ]; then
     die "no token and no --direct. Usage: sh install.sh <TOKEN> [--name LABEL] [--console] [--remote-update] [--auto-update] [--diagnostics] [--sessions-sync] [--second]
-       sh install.sh --direct --allow nodekey:... [--pair TOKEN] [--derpmap https://...] [--music [--music-dir FOLDER]]  (no account needed)"
+       sh install.sh --direct --allow nodekey:... [--pair TOKEN] [--primary TOKEN] [--derpmap https://...] [--music [--music-dir FOLDER]]  (no account needed)"
 fi
 if [ -n "$ALLOW_KEYS" ] && [ "$DIRECT_ON" != yes ]; then
     die "--allow needs --direct (or a machine where direct mode is already on)"
@@ -647,6 +670,57 @@ if [ -n "$PAIR_ARG" ]; then
       *[!A-Za-z0-9_-]*) die "--pair: not a pairing token (unexpected characters in the address)" ;;
     esac
     for k in $ALLOW_KEYS; do PAIR_FOR=$k; done
+fi
+
+# The primary token: <b64 signing pub>.<64hex coordinator node key>.<64hex
+# join node key>.<tc address>. Shape only, checked while a person watches —
+# the helper checks the rest. It needs the tunnel the join travels over, so
+# --direct (or an earlier one) is required, like --pair.
+PRIMARY_PUB=""
+PRIMARY_NODE=""
+PRIMARY_JOIN=""
+PRIMARY_ADDR=""
+if [ -n "$PRIMARY_ARG" ]; then
+    [ "$DIRECT_ON" = yes ] || die "--primary needs --direct (or a machine where direct mode is already on)"
+    p_pub=${PRIMARY_ARG%%.*}
+    p_rest=${PRIMARY_ARG#*.}
+    p_node=${p_rest%%.*}
+    p_rest2=${p_rest#*.}
+    p_join=${p_rest2%%.*}
+    p_addr=${p_rest2#*.}
+    [ "$p_pub" != "$PRIMARY_ARG" ] && [ "$p_node" != "$p_rest" ] && \
+      [ "$p_join" != "$p_rest2" ] && [ "$p_addr" != "$p_rest2" ] || \
+      die "--primary: not a primary token (want <key>.<node>.<join>.<tc address>)"
+    case "$p_pub" in
+      *[!A-Za-z0-9+/=]*) die "--primary: not a primary token (unexpected characters in the key)" ;;
+    esac
+    case "$p_pub" in
+      *=) ;;
+      *) die "--primary: not a primary token (the key does not end in padding)" ;;
+    esac
+    case "${p_pub%=}" in
+      *[!A-Za-z0-9+/]*) die "--primary: not a primary token (unexpected characters in the key)" ;;
+    esac
+    [ "${#p_pub}" -eq 44 ] || die "--primary: not a primary token (the key is not 32 bytes in base64)"
+    for hf in "$p_node" "$p_join"; do
+      [ "${#hf}" -eq 64 ] || die "--primary: not a primary token (the two keys want 64 hex characters each)"
+      case "$hf" in
+        *[!0-9a-f]*) die "--primary: not a primary token (non-hex characters in a key)" ;;
+      esac
+    done
+    case "$p_addr" in
+      tc?*) ;;
+      *) die "--primary: not a primary token (the address after the last dot starts with tc)" ;;
+    esac
+    case "${p_addr#tc}" in
+      *[!A-Za-z0-9_-]*) die "--primary: not a primary token (unexpected characters in the address)" ;;
+    esac
+    [ "${#p_addr}" -ge 18 ] && [ "${#p_addr}" -le 2050 ] || \
+      die "--primary: not a primary token (the address is not tc + 16-2048 key characters)"
+    PRIMARY_PUB=$p_pub
+    PRIMARY_NODE=$p_node
+    PRIMARY_JOIN=$p_join
+    PRIMARY_ADDR=$p_addr
 fi
 
 # ----------------------------------------------------------- one per machine
@@ -1205,6 +1279,22 @@ if [ -n "$PAIR_ARG" ]; then
     printf '%s\n%s\n' "$PAIR_ARG" "$PAIR_FOR" > "$conf/pairing.new"
     chmod 0600 "$conf/pairing.new"
     mv -f "$conf/pairing.new" "$conf/pairing"
+fi
+# The primary join (go/primary.go): the signing key pinned for the
+# coordination kinds only, and the join key held in primary-join until the
+# helper's join lands. delegated-keys carries the coordinator's tunnel key
+# by itself — it reaches the hello and command doors alone, so it is never
+# written into allowed-clients. delegated-keys and primary-join are written
+# atomically like pairing.
+if [ -n "$PRIMARY_ARG" ]; then
+    rm -f "$conf/delegated-keys.new"
+    printf '%s nodekey:%s primary\n' "$PRIMARY_PUB" "$PRIMARY_NODE" > "$conf/delegated-keys.new"
+    chmod 0600 "$conf/delegated-keys.new"
+    mv -f "$conf/delegated-keys.new" "$conf/delegated-keys"
+    rm -f "$conf/primary-join.new"
+    printf '%s\n%s\n' "$PRIMARY_ADDR" "$PRIMARY_JOIN" > "$conf/primary-join.new"
+    chmod 0600 "$conf/primary-join.new"
+    mv -f "$conf/primary-join.new" "$conf/primary-join"
 fi
 # The address changes if the tunnel identity does, and a stale one from a
 # previous install would be printed below as though it were current.
@@ -1767,6 +1857,10 @@ if [ -f "$conf/direct" ]; then
             say "                the address is printed by:  $BINDIR/$NAME address"
         fi
         say "                add another browser with:  $BINDIR/$NAME allow <nodekey:...>"
+    fi
+    if [ -f "$conf/primary-join" ]; then
+        say "                joining the primary this line names: once both machines can"
+        say "                reach each other over the tunnel, this one enrolls by itself."
     fi
     say "                off with:  $BINDIR/$NAME direct off   (then restart)"
 fi

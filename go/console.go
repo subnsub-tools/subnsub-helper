@@ -564,6 +564,12 @@ func mailboxRefusal(c consoleCmd) string {
 		// address holds the tunnel's pre-shared key, and never goes through
 		// the relay.
 		return "tunnel-only"
+	case "primary-on", "primary-off", "primary-roster", "primary-ticket",
+		"delegate", "undelegate":
+		// The primary helper's coordination (primary.go, delegate.go):
+		// roster, tickets and delegation are tunnel business, never the
+		// relay's.
+		return "tunnel-only"
 	}
 	return ""
 }
@@ -591,6 +597,22 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 		return runPutPeer(c), false
 	case "put-peers":
 		return runPutPeers(c), false
+	case "primary-on":
+		// This machine becomes the primary (primary.go): its own signing
+		// key is made here and never leaves.
+		return runPrimaryOn(c), false
+	case "primary-off":
+		return runPrimaryOff(c), false
+	case "primary-roster":
+		return runPrimaryRoster(c), false
+	case "primary-ticket":
+		return runPrimaryTicket(c), false
+	case "delegate":
+		// A primary's signing key pinned for the coordination kinds
+		// (delegate.go).
+		return runDelegate(c), false
+	case "undelegate":
+		return runUndelegate(c), false
 	case "clone":
 		return runClone(c), false
 	case "unclone":
