@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,12 +15,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"subnsubmonitor/transport"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
@@ -381,6 +385,191 @@ func dialPut(t *testing.T, ask string) (net.Conn, *bufio.Reader, map[string]any)
 	var out map[string]any
 	json.Unmarshal([]byte(line), &out)
 	return c, r, out
+}
+
+// fakeTunnel stands in for a put client's tailcat client: a stale one never
+// answers a dial (its relay session gone), a partial one starts an answer and
+// stops, a healthy one answers the upgrade as the peer's helper does.
+type fakeTunnel struct {
+	stale, partial bool
+	mu             sync.Mutex
+	dials, closes  int
+	conns          []net.Conn
+}
+
+func (f *fakeTunnel) DialTCPPort(ctx context.Context, port uint16) (net.Conn, error) {
+	f.mu.Lock()
+	f.dials++
+	f.mu.Unlock()
+	if f.stale {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	mine, theirs := net.Pipe()
+	f.mu.Lock()
+	f.conns = append(f.conns, mine)
+	f.mu.Unlock()
+	go func() {
+		defer theirs.Close()
+		r := bufio.NewReader(theirs)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		if f.partial {
+			io.WriteString(theirs, "HTTP/1.1 403 Forbidden\r\n")
+			return
+		}
+		io.WriteString(theirs, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: put\r\nConnection: Upgrade\r\n\r\n")
+		io.Copy(io.Discard, theirs)
+	}()
+	return mine, nil
+}
+
+func (f *fakeTunnel) DiscoPing(ctx context.Context) (*ipnstate.PingResult, error) {
+	return nil, errors.New("fake")
+}
+
+// Close ends the client's connections, as tailcat's does.
+func (f *fakeTunnel) Close() error {
+	f.mu.Lock()
+	f.closes++
+	conns := f.conns
+	f.conns = nil
+	f.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
+	return nil
+}
+
+func (f *fakeTunnel) state() (dials, closes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dials, f.closes
+}
+
+// withFakeTunnels makes the put clients from these, in order, and leaves an
+// earlier stream's client (the first) behind for macStudy01, as if used before.
+func withFakeTunnels(t *testing.T, f *putFixture, tunnels ...*fakeTunnel) *[]*fakeTunnel {
+	t.Helper()
+	f.addPeer(t, "macStudy01", "Study", testPutAddr(t), key.NewNode().Public())
+	made := &[]*fakeTunnel{}
+	wasDial, wasWait := putDial, putReusedWait
+	putDial = func(addr string, priv key.NodePrivate) putTunnel {
+		next := tunnels[len(*made)]
+		*made = append(*made, next)
+		return next
+	}
+	putReusedWait = 300 * time.Millisecond
+	t.Cleanup(func() { putDial, putReusedWait = wasDial, wasWait; putForgetClients() })
+	p, _ := putPeerByAgent("macStudy01")
+	pc, reused, err := putClientFor(p)
+	if err != nil || reused || pc.cl != tunnels[0] {
+		t.Fatalf("first client: %v %v %v", pc, reused, err)
+	}
+	pc.release()
+	putLocal.Lock()
+	putLocal.on = false
+	putLocal.Unlock()
+	startPutSocket()
+	return made
+}
+
+func cachedClient(agent string) *putClient {
+	putClients.Lock()
+	defer putClients.Unlock()
+	return putClients.m[agent]
+}
+
+// A client kept from an earlier stream whose tunnel stopped answering (a Mac
+// that slept, user 2026-11-20 mbp to m2) gets putReusedWait, is then closed,
+// and a fresh one carries the stream in the same open; a wake closes them all,
+// streams included, each once.
+func TestPutStaleClientReplaced(t *testing.T) {
+	f := newPutFixture(t)
+	stale, fresh := &fakeTunnel{stale: true}, &fakeTunnel{}
+	withFakeTunnels(t, f, stale, fresh)
+	started := time.Now()
+	c, r, out := dialPut(t, `{"op":"open","agent":"macStudy01"}`)
+	defer c.Close()
+	took := time.Since(started)
+	if out["ok"] != true {
+		t.Fatalf("open: %v", out)
+	}
+	if took < putReusedWait || took > 5*time.Second {
+		t.Fatalf("the open took %v: the stale client should get %v, then the fresh one answer at once", took, putReusedWait)
+	}
+	if dials, closes := stale.state(); dials != 1 || closes != 1 {
+		t.Fatalf("stale client: %d dials, %d closes", dials, closes)
+	}
+	if dials, closes := fresh.state(); dials != 1 || closes != 0 {
+		t.Fatalf("fresh client: %d dials, %d closes", dials, closes)
+	}
+	if pc := cachedClient("macStudy01"); pc == nil || pc.cl != fresh {
+		t.Fatal("the fresh client is not the one kept for the next stream")
+	}
+	// Waking while the stream is open: the client is given up and closed at
+	// once, and its stream with it; closing the stream later closes nothing twice.
+	putForgetClients()
+	if pc := cachedClient("macStudy01"); pc != nil {
+		t.Fatal("a client was kept across a wake")
+	}
+	if _, closes := fresh.state(); closes != 1 {
+		t.Fatalf("after a wake the fresh client closed %d times", closes)
+	}
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	waited := time.Now()
+	if _, err := r.ReadByte(); err == nil || time.Since(waited) > 2*time.Second {
+		t.Fatalf("the stream outlived its client (%v after %v)", err, time.Since(waited))
+	}
+	c.Close()
+	time.Sleep(100 * time.Millisecond)
+	if _, closes := fresh.state(); closes != 1 {
+		t.Fatalf("the fresh client closed %d times", closes)
+	}
+}
+
+// An answer that began is not retried, however it ends: the tunnel works, and
+// the other side may have handed the stream on. The client is kept.
+func TestPutPartialAnswerNotRetried(t *testing.T) {
+	f := newPutFixture(t)
+	partial := &fakeTunnel{partial: true}
+	made := withFakeTunnels(t, f, partial, &fakeTunnel{})
+	c, _, out := dialPut(t, `{"op":"open","agent":"macStudy01"}`)
+	c.Close()
+	if out["ok"] != false || out["error"] != "unreachable" {
+		t.Fatalf("open: %v", out)
+	}
+	if len(*made) != 1 {
+		t.Fatalf("%d clients made: an answered open was retried", len(*made))
+	}
+	if pc := cachedClient("macStudy01"); pc == nil || pc.cl != partial {
+		t.Fatal("a client whose tunnel answered was given up")
+	}
+}
+
+// A peer removed while its stale client waits is not dialed again.
+func TestPutRetrySkipsRemovedPeer(t *testing.T) {
+	f := newPutFixture(t)
+	made := withFakeTunnels(t, f, &fakeTunnel{stale: true}, &fakeTunnel{})
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		f.command(t, "put-peer", "macStudy01", "")
+	}()
+	c, _, out := dialPut(t, `{"op":"open","agent":"macStudy01"}`)
+	c.Close()
+	if out["ok"] != false || out["error"] != "unknown-peer" {
+		t.Fatalf("open: %v", out)
+	}
+	if len(*made) != 1 {
+		t.Fatalf("%d clients made: a removed peer was dialed again", len(*made))
+	}
 }
 
 // put-key says whether put is on this Mac: its app in Applications, or put

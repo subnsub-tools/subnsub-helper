@@ -76,6 +76,7 @@ import (
 	"subnsubmonitor/transport"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 )
@@ -866,37 +867,53 @@ func putOpen(c net.Conn, r *bufio.Reader, agent string) {
 		return
 	}
 	defer putStreamEnd()
-	pc, err := putClientFor(p)
+	// One deadline for the whole open, retry included.
+	deadline := time.Now().Add(putDialWait)
+	pc, reused, err := putClientFor(p)
 	if err != nil {
 		fail("unavailable")
 		return
 	}
-	defer pc.release()
-	ctx, cancel := context.WithTimeout(context.Background(), putDialWait)
-	nc, err := pc.cl.DialTCPPort(ctx, directPort)
-	cancel()
-	if err != nil {
-		fail("unreachable")
-		return
-	}
-	nc.SetDeadline(time.Now().Add(putDialWait))
-	if _, err := io.WriteString(nc, "GET "+putStreamPath+" HTTP/1.1\r\nHost: tailcat\r\nUpgrade: put\r\nConnection: Upgrade\r\n\r\n"); err != nil {
-		nc.Close()
-		fail("unreachable")
-		return
-	}
-	nr := bufio.NewReader(nc)
-	status, upgraded, code, err := putReadHead(nr)
-	if err != nil {
-		nc.Close()
-		fail("unreachable")
-		return
-	}
-	if status != http.StatusSwitchingProtocols || !upgraded {
-		nc.Close()
-		if code == "" {
-			code = "refused"
+	first := deadline
+	if reused {
+		if d := time.Now().Add(putReusedWait); d.Before(first) {
+			first = d
 		}
+	}
+	nc, nr, code, err := putConnect(pc, first)
+	if errors.Is(err, errPutSilent) && reused {
+		// A client kept from an earlier stream can have lost its tunnel
+		// without knowing it — its relay session gone while this Mac slept —
+		// and, kept busy, it is never idle long enough to be reaped: every
+		// stream then waited out putDialWait and failed (user 2026-11-20, mbp
+		// to m2). It is closed, and a fresh one is tried once, in the time
+		// left, for the peer as its entry is now (it may have changed or gone
+		// meanwhile).
+		putDiscardClient(pc)
+		pc.release()
+		now, ok := putPeerByAgent(agent)
+		if !ok {
+			fail("unknown-peer")
+			return
+		}
+		p = now
+		if pc, _, err = putClientFor(p); err != nil {
+			fail("unavailable")
+			return
+		}
+		nc, nr, code, err = putConnect(pc, deadline)
+	}
+	defer pc.release()
+	if err != nil {
+		// A client that got no answer at all is not kept for the next stream:
+		// that one starts afresh. One that was answered has a tunnel that works.
+		if errors.Is(err, errPutSilent) {
+			putDiscardClient(pc)
+		}
+		fail("unreachable")
+		return
+	}
+	if code != "" {
 		fail(code)
 		return
 	}
@@ -909,6 +926,48 @@ func putOpen(c net.Conn, r *bufio.Reader, agent string) {
 		return
 	}
 	putPipe(c, r, nc, nr)
+}
+
+// errPutSilent: the peer's helper did not answer at all — no connection, or no
+// byte of an answer — which is what a client whose tunnel is gone sees.
+var errPutSilent = errors.New("no answer")
+
+// putConnect opens the stream to the peer's helper through the client, by
+// deadline: the connection and its reader once the other side has taken it; a
+// refusal's code (the connection closed) when it answered with no; an error
+// when it did not, wrapping errPutSilent while no byte of an answer came.
+func putConnect(pc *putClient, deadline time.Time) (net.Conn, *bufio.Reader, string, error) {
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	nc, err := pc.cl.DialTCPPort(ctx, directPort)
+	cancel()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("%w: %v", errPutSilent, err)
+	}
+	nc.SetDeadline(deadline)
+	if _, err := io.WriteString(nc, "GET "+putStreamPath+" HTTP/1.1\r\nHost: tailcat\r\nUpgrade: put\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+		nc.Close()
+		return nil, nil, "", fmt.Errorf("%w: %v", errPutSilent, err)
+	}
+	nr := bufio.NewReader(nc)
+	if _, err := nr.Peek(1); err != nil {
+		nc.Close()
+		return nil, nil, "", fmt.Errorf("%w: %v", errPutSilent, err)
+	}
+	// An answer has begun: whatever happens now, the tunnel works, and the
+	// other side may have handed the stream on already, so it is not retried.
+	status, upgraded, code, err := putReadHead(nr)
+	if err != nil {
+		nc.Close()
+		return nil, nil, "", err
+	}
+	if status != http.StatusSwitchingProtocols || !upgraded {
+		nc.Close()
+		if code == "" {
+			code = "refused"
+		}
+		return nil, nil, code, nil
+	}
+	return nc, nr, "", nil
 }
 
 // putReadHead reads the other helper's answer to the upgrade — at most
@@ -978,12 +1037,25 @@ func putReadHead(r *bufio.Reader) (status int, upgraded bool, code string, err e
 
 // ── the clients this Mac dials its peers with ────────────────────────────
 
+// How long a client kept from an earlier stream gets before it is given up for
+// a fresh one (putOpen): a healthy one answers well inside it. A test shortens it.
+var putReusedWait = 5 * time.Second
+
+// putTunnel is what a put client needs of its tailcat client; a test puts its
+// own in its place.
+type putTunnel interface {
+	DialTCPPort(ctx context.Context, port uint16) (net.Conn, error)
+	DiscoPing(ctx context.Context) (*ipnstate.PingResult, error)
+	Close() error
+}
+
 type putClient struct {
-	agent string
-	addr  string
-	cl    *tailcat.Client
-	users int
-	last  time.Time
+	agent  string
+	addr   string
+	cl     putTunnel
+	users  int
+	last   time.Time
+	closed bool
 	// "direct", "derp", or "" until a ping has said.
 	via string
 }
@@ -995,29 +1067,31 @@ var putClients struct {
 }
 
 // putDial makes a client; a test puts its own in its place.
-var putDial = func(addr string, priv key.NodePrivate) *tailcat.Client {
+var putDial = func(addr string, priv key.NodePrivate) putTunnel {
 	return &tailcat.Client{Server: tailcat.ConnBlob(addr), Key: priv, Logf: logger.Discard, DERPMapURL: derpMapURL()}
 }
 
 // putClientFor is the peer's client, under the key for that peer, kept
-// between streams so that the next one finds the tunnel up.
-func putClientFor(p putPeer) (*putClient, error) {
+// between streams so that the next one finds the tunnel up; reused says it
+// was kept from earlier rather than made now.
+func putClientFor(p putPeer) (pc *putClient, reused bool, err error) {
 	priv, err := putKeyFor(p.Agent)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	putClients.Lock()
 	defer putClients.Unlock()
 	if putClients.m == nil {
 		putClients.m = map[string]*putClient{}
 	}
-	pc := putClients.m[p.Agent]
+	pc = putClients.m[p.Agent]
 	if pc != nil && pc.addr != p.Addr {
 		if pc.users == 0 {
-			pc.cl.Close()
+			putCloseLocked(pc)
 		}
 		pc = nil
 	}
+	reused = pc != nil
 	if pc == nil {
 		pc = &putClient{agent: p.Agent, addr: p.Addr, cl: putDial(p.Addr, priv)}
 		putClients.m[p.Agent] = pc
@@ -1029,7 +1103,7 @@ func putClientFor(p putPeer) (*putClient, error) {
 		putClients.reaping = true
 		go putReap()
 	}
-	return pc, nil
+	return pc, reused, nil
 }
 
 func (pc *putClient) release() {
@@ -1039,7 +1113,7 @@ func (pc *putClient) release() {
 	pc.last = time.Now()
 	// Dropped or replaced while in use: closed now that nobody is.
 	if pc.users == 0 && putClients.m[pc.agent] != pc {
-		pc.cl.Close()
+		putCloseLocked(pc)
 	}
 }
 
@@ -1083,8 +1157,41 @@ func putDropClient(agent string) {
 	if pc := putClients.m[agent]; pc != nil {
 		delete(putClients.m, agent)
 		if pc.users == 0 {
-			pc.cl.Close()
+			putCloseLocked(pc)
 		}
+	}
+}
+
+// putCloseLocked closes a client once. Caller holds putClients.
+func putCloseLocked(pc *putClient) {
+	if !pc.closed {
+		pc.closed = true
+		pc.cl.Close()
+	}
+}
+
+// putDiscardClient gives a client up: out of use, so the next stream makes a
+// fresh one, and closed at once, streams on it included (they were not getting
+// through either), so that its successor never shares the relay with it under
+// the same key — two clients with one key push each other off.
+func putDiscardClient(pc *putClient) {
+	putClients.Lock()
+	defer putClients.Unlock()
+	if putClients.m[pc.agent] == pc {
+		delete(putClients.m, pc.agent)
+	}
+	putCloseLocked(pc)
+}
+
+// putForgetClients gives every client up, as putDiscardClient does: called
+// when this Mac wakes (outageTick), since a relay session does not outlive a
+// sleep and a client may not notice.
+func putForgetClients() {
+	putClients.Lock()
+	defer putClients.Unlock()
+	for agent, pc := range putClients.m {
+		delete(putClients.m, agent)
+		putCloseLocked(pc)
 	}
 }
 
@@ -1097,7 +1204,7 @@ func putReap() {
 		for agent, pc := range putClients.m {
 			if pc.users == 0 && time.Since(pc.last) > putClientIdle {
 				delete(putClients.m, agent)
-				pc.cl.Close()
+				putCloseLocked(pc)
 			}
 		}
 		putClients.Unlock()

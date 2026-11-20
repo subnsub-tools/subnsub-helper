@@ -425,6 +425,8 @@ func outageTick(now time.Time) {
 	if !outages.prev.IsZero() {
 		if gap := outageGap(outages.prev, now); gap >= outageMinSec {
 			outageAdd(outage{At: outages.prev.Unix(), End: now.Unix(), Kind: outageKindSuspend})
+			// Awake again: put's tunnels to the other Macs start afresh (put.go).
+			go putForgetClients()
 		}
 	}
 	outages.prev = now
