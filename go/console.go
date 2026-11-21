@@ -559,10 +559,10 @@ func mailboxRefusal(c consoleCmd) string {
 		// The Files tab (files.go): the disks are read over the tunnel the
 		// answers go back on, never through the relay.
 		return "tunnel-only"
-	case "put-key", "put-peer", "put-peers":
-		// The owner's other Macs and their tunnel addresses (put.go): an
-		// address holds the tunnel's pre-shared key, and never goes through
-		// the relay.
+	case "put-key", "put-peer", "put-peers", "host-key":
+		// The owner's other Macs and their tunnel addresses (put.go), and
+		// the primary's, for the files it hosts (host.go): an address holds
+		// the tunnel's pre-shared key, and never goes through the relay.
 		return "tunnel-only"
 	case "primary-on", "primary-off", "primary-roster", "primary-ticket",
 		"delegate", "undelegate":
@@ -597,6 +597,10 @@ func runCommand(c consoleCmd) (res consoleResult, swap bool) {
 		return runPutPeer(c), false
 	case "put-peers":
 		return runPutPeers(c), false
+	case "host-key":
+		// Where this Mac's primary is, and the key this Mac puts files
+		// to host there from (host.go).
+		return runHostKey(c), false
 	case "primary-on":
 		// This machine becomes the primary (primary.go): its own signing
 		// key is made here and never leaves.

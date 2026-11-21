@@ -382,8 +382,8 @@ func runPrimaryOn(c consoleCmd) consoleResult {
 	return res
 }
 
-// runPrimaryOff ends the primary role: the signing key, the roster and the
-// tickets go; primary-seed stays, so a later primary-on derives the same
+// runPrimaryOff ends the primary role: the signing key, the roster, the
+// tickets and what was hosted go; primary-seed stays, so a later primary-on derives the same
 // dial keys for the same kids.
 func runPrimaryOff(c consoleCmd) consoleResult {
 	res, ok := primarySealed(c)
@@ -415,6 +415,9 @@ func runPrimaryOff(c consoleCmd) consoleResult {
 		}
 	}
 	primaryFileMu.Unlock()
+	// What this machine hosted goes with the role (host.go): the links
+	// were the primary's to give.
+	hostClear()
 	primaryConnsReset()
 	primaryWake()
 	res.Code, res.Out = 0, "{}"
@@ -1179,6 +1182,7 @@ type sweepLink struct {
 	conn                   memberConn // nil → the primary itself, in-process
 	self                   bool
 	put                    bool // hello said put (self: putSupported)
+	host                   bool // hello said host (host.go)
 	answered               bool // put-key succeeded this round
 	absent                 bool // put-key said put is not on that Mac
 	keys, held             map[string]string
@@ -1278,6 +1282,7 @@ func primaryRound(ctx context.Context) {
 			if agent, caps, herr := conn.hello(ctx); herr == nil && agent == m.Agent {
 				l.conn = conn
 				l.put = capsHas(caps, transport.CapPut)
+				l.host = capsHas(caps, transport.CapHost)
 			}
 		}
 		links = append(links, l)
@@ -1406,6 +1411,9 @@ func primaryRound(ctx context.Context) {
 	// The persisted removals: each tombstone's empty put-peer goes to every
 	// answered put member that has not acked it yet.
 	primaryDropsRound(ctx, links)
+	// And where the files out hosts go (host.go): each member that can is
+	// told this machine's address and asked for the key it dials from.
+	primaryHostRound(ctx, sign, roster, links)
 }
 
 // runPrimaryCoordinator keeps the rounds coming for as long as the carrier

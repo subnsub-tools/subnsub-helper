@@ -833,6 +833,12 @@ func startPutSocket() {
 type putAsk struct {
 	Op    string `json:"op"`
 	Agent string `json:"agent,omitempty"`
+	// host and unhost (host.go): the Shelf item, what it is called, how
+	// many bytes it has, and whether out has them to send.
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+	Size int64  `json:"size,omitempty"`
+	Have bool   `json:"have,omitempty"`
 }
 
 func putAnswer(c net.Conn, v any) error {
@@ -882,7 +888,7 @@ func servePutLocal(c net.Conn) {
 	// Only the user's own programs reach this socket, and put asks these: it
 	// is on this Mac. A hint rather than proof of the app, as the socket is.
 	switch ask.Op {
-	case "peers", "open", "accept", "screen":
+	case "peers", "open", "accept", "screen", "host", "unhost":
 		putSeen.Store(true)
 	}
 	switch ask.Op {
@@ -898,6 +904,8 @@ func servePutLocal(c net.Conn) {
 		putAnswer(c, map[string]any{
 			"ok": true, "self": who{agentID(), agentLabel()}, "peers": peers,
 			"tunnel": directAddress() != "", "version": helperVersion,
+			// Whether a Shelf item can be given a link here (host.go).
+			"host": hostAvailable(),
 		})
 		c.Close()
 	case "accept":
@@ -916,6 +924,8 @@ func servePutLocal(c net.Conn) {
 		putParkScreen(c)
 	case "open":
 		putOpen(c, r, ask.Agent)
+	case "host", "unhost":
+		hostLocal(c, r, ask)
 	default:
 		putAnswer(c, map[string]any{"ok": false, "error": "unknown-op"})
 		c.Close()

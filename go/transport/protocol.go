@@ -205,6 +205,10 @@ const (
 	// — a primary's — for the coordination kinds only (main package,
 	// delegate.go, signing.go delegatedKinds).
 	CapDelegate = "delegate"
+	// CapHost: out on this Mac can have a Shelf item kept on the owner's
+	// primary helper and be given its tailnet link; a primary asks such a
+	// member host-key (main package, host.go).
+	CapHost = "host"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on

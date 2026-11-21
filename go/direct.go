@@ -457,10 +457,11 @@ func runDirect(ctx context.Context) {
 			// The file, the portable copies still current (clone.go), the
 			// read-only grants another computer is copying under
 			// (filesgrant.go), the owner's other Macs, for put (put.go),
-			// the live join tickets of a primary (primary.go), and the
-			// coordinators' tunnel keys (delegate.go).
+			// the live join tickets of a primary (primary.go), the
+			// coordinators' tunnel keys (delegate.go), and on a primary the
+			// keys its members put files to host from (host.go).
 			Allowed: func() []key.NodePublic {
-				return append(append(append(append(append(loadAllowedClients(), activeCloneNodes()...), activeGrantNodes()...), activePutNodes()...), activeJoinNodes()...), activeDelegateNodes()...)
+				return append(append(append(append(append(append(loadAllowedClients(), activeCloneNodes()...), activeGrantNodes()...), activePutNodes()...), activeJoinNodes()...), activeDelegateNodes()...), activeHostNodes()...)
 			},
 			Handler: h,
 		})
@@ -535,7 +536,7 @@ func serveDirect(ctx context.Context, tc *transport.Tailcat) {
 					warnf("direct: allowed a new browser")
 				}
 			}
-			for _, k := range append(append(append(append(activeCloneNodes(), activeGrantNodes()...), activePutNodes()...), activeJoinNodes()...), activeDelegateNodes()...) {
+			for _, k := range append(append(append(append(append(activeCloneNodes(), activeGrantNodes()...), activePutNodes()...), activeJoinNodes()...), activeDelegateNodes()...), activeHostNodes()...) {
 				if !tc.Known(k) {
 					tc.AddAllowed(k)
 				}
@@ -640,7 +641,7 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/v1/command", "/v1/pty/in", "/v1/pty/resize", "/v1/pty/close", "/v1/files/put",
 		"/v1/screen/in", "/v1/screen/beat", "/v1/screen/close",
 		"/v1/files/grant/open", "/v1/files/grant/walk", "/v1/files/grant/done", "/v1/speed/up",
-		"/v1/primary/join":
+		"/v1/primary/join", hostPutPath, hostDropPath:
 		if r.Method != http.MethodPost {
 			h.refuse(w, http.StatusMethodNotAllowed, "unknown-frame")
 			return
@@ -673,6 +674,12 @@ func (h *directHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// (primary.go): the join door consumes the ticket.
 		if ticket, ok := primaryJoinForNode(k); ok {
 			h.primaryJoinServe(w, r, ticket)
+			return
+		}
+		// One of a primary's members, with a file for it to host or to
+		// take down (host.go): those three paths and nothing else.
+		if agent, ok := hostMemberForNode(k); ok {
+			h.hostServe(w, r, agent)
 			return
 		}
 		// A coordinator's key (delegate.go): the hello and the command
@@ -845,6 +852,9 @@ func directCapsFor(r *http.Request) []string {
 				// coming from the browsers on the list alone.
 				if putSupported && loadTrust().sealed {
 					caps = append(caps, transport.CapPut)
+					if !hostOff() {
+						caps = append(caps, transport.CapHost)
+					}
 				}
 				// The primary pair (primary.go, delegate.go): this machine
 				// coordinates, or accepts a coordinator's signature for
@@ -884,6 +894,9 @@ func directCapsFor(r *http.Request) []string {
 		if delegatedPeer(k) && loadTrust().sealed {
 			if putSupported {
 				caps = append(caps, transport.CapPut)
+				if !hostOff() {
+					caps = append(caps, transport.CapHost)
+				}
 			}
 			caps = append(caps, transport.CapPrimary, transport.CapDelegate)
 		}

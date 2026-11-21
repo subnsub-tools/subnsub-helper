@@ -319,7 +319,7 @@ func commandSigner(c consoleCmd, agent string, t trust) ed25519.PublicKey {
 // the console, the machine's own grants, or its files. A kind absent here
 // is refused not-delegated even when the signature verifies.
 var delegatedKinds = map[string]bool{
-	"put-key": true, "put-peer": true, "put-peers": true,
+	"put-key": true, "put-peer": true, "put-peers": true, "host-key": true,
 	"rename": true, "update": true,
 	"refresh": true, "inspect": true, "myip": true,
 }

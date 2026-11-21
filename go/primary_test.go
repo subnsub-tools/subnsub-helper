@@ -517,6 +517,7 @@ type fakeMemberConn struct {
 	caps     []string
 	helloErr error
 	putKey   string // Out for put-key; "" → the default two-key answer
+	hostKey  string // the key host-key answers; "" → "{}"
 	mu       sync.Mutex
 	helloN   int
 	cmds     []fakeCmd
@@ -550,6 +551,9 @@ func (f *fakeMemberConn) command(ctx context.Context, kind, target, cmd string) 
 			out = `{"keys":{},"held":{}}`
 		}
 		return consoleResult{Code: 0, Out: out}, nil
+	}
+	if kind == "host-key" && f.hostKey != "" {
+		return consoleResult{Code: 0, Out: `{"key":"` + f.hostKey + `"}`}, nil
 	}
 	return consoleResult{Code: 0, Out: "{}"}, nil
 }

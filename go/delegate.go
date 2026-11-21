@@ -136,9 +136,21 @@ func runDelegate(c consoleCmd) consoleResult {
 		res.Error = "bad-key"
 		return res
 	}
+	// Another primary than the one before: where the old one hosted files
+	// (host-at, host.go) is not where this one does, and its first round
+	// says where that is.
+	fresh := true
+	for _, d := range readDelegatedKeys() {
+		if d.Pub.Equal(pub) {
+			fresh = false
+		}
+	}
 	if err := writeDelegatedKeys(delegatedKey{Pub: pub, PubText: strings.TrimSpace(a.Key), Node: node}); err != nil {
 		res.Error = "save-failed"
 		return res
+	}
+	if fresh {
+		hostAtClear()
 	}
 	admitNow(node)
 	res.Code, res.Out = 0, "{}"
@@ -190,6 +202,8 @@ func runUndelegate(c consoleCmd) consoleResult {
 		res.Error = "save-failed"
 		return res
 	}
+	// No primary, so nowhere to host a file (host.go).
+	hostAtClear()
 	res.Code, res.Out = 0, "{}"
 	return res
 }

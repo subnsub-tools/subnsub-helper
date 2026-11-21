@@ -19,7 +19,9 @@ package main
 // from here under a read-only grant (filesgrant.go, filesfetch.go), which gets
 // the grant's few paths and nothing else. Every request and every response
 // inside is sealed to that session. What a peer on the tailnet sees of this
-// port is that it exists.
+// port is that it exists — and, on a primary helper, the files its owner
+// chose to give a link to (GET /s/<token>/<name>, host.go), each to whoever
+// holds its link.
 //
 //	derive: HKDF-SHA256 over DH(reader, machine) || DH(reader's ephemeral,
 //	        machine's ephemeral), so a key taken later opens no recorded session
@@ -101,7 +103,11 @@ var (
 	tailnetIfaceRe = regexp.MustCompile(`(?i)^(tailscale|utun)`)
 	tailnetHostRe  = regexp.MustCompile(`^[a-z0-9-]+(\.[a-z0-9-]+)+$`)
 	tailnetRoad    atomic.Pointer[transport.TailnetRoad]
-	tailnetServe   = &tailnetServer{sessions: map[string]*tnSession{}}
+	// tailnetSure: the address the road answers on is known to be
+	// Tailscale's (tailnetDiscover), which the files a primary hosts ask
+	// before a link is given or answered (host.go).
+	tailnetSure  atomic.Bool
+	tailnetServe = &tailnetServer{sessions: map[string]*tnSession{}}
 )
 
 type tailnetCtxKey struct{}
@@ -147,10 +153,10 @@ func tailnetLetIn(k key.NodePublic) bool { return tailnetAdmitted(k) || grantHel
 // socket, whatever they are called and wherever they were put here. A carrier's
 // NAT uses the same address range, so an address on an interface not named like
 // Tailscale's counts only if Tailscale's resolver knows it.
-func tailnetDiscover(ctx context.Context) (ip, host string, ok bool) {
+func tailnetDiscover(ctx context.Context) (ip, host string, sure, ok bool) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return "", "", false
+		return "", "", false, false
 	}
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
@@ -177,10 +183,15 @@ func tailnetDiscover(ctx context.Context) (ip, host string, ok bool) {
 			if name == "" && !tailnetIfaceRe.MatchString(ifc.Name) {
 				continue
 			}
-			return addr.String(), name, true
+			// Sure it is Tailscale's: its own resolver named the address,
+			// or the interface is one only Tailscale makes. A utun with an
+			// address in the range may be another network's, which the
+			// sealed road can afford and a link cannot.
+			sure = name != "" || strings.HasPrefix(strings.ToLower(ifc.Name), "tailscale")
+			return addr.String(), name, sure, true
 		}
 	}
-	return "", "", false
+	return "", "", false, false
 }
 
 func tailnetNameOf(ctx context.Context, ip string) string {
@@ -218,6 +229,7 @@ func runTailnet(ctx context.Context) {
 		port    = tailnetPort
 	)
 	stop := func() {
+		tailnetSure.Store(false)
 		tailnetRoad.Store(nil)
 		if srv != nil {
 			srv.Close()
@@ -227,7 +239,7 @@ func runTailnet(ctx context.Context) {
 	}
 	defer stop()
 	for {
-		ip, host, ok := tailnetDiscover(ctx)
+		ip, host, sure, ok := tailnetDiscover(ctx)
 		// Nobody on the list means nobody it could answer: the same rule that
 		// keeps the tunnel from starting.
 		if !ok || len(loadAllowedClients()) == 0 {
@@ -263,6 +275,7 @@ func runTailnet(ctx context.Context) {
 			if boundIP != "" {
 				if road := tailnetRoadFor(host, boundIP, port); road != nil {
 					tailnetRoad.Store(road)
+					tailnetSure.Store(sure)
 				}
 			}
 		}
@@ -454,6 +467,12 @@ func randHex(n int) (string, []byte, error) {
 // ── the port ────────────────────────────────────────────────────────────
 
 func (t *tailnetServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A file the primary hosts, by its link (host.go): the one thing on
+	// this port that needs no key, since the link is the permission.
+	if strings.HasPrefix(r.URL.Path, "/s/") {
+		hostedServe(w, r)
+		return
+	}
 	if o := r.Header.Get("Origin"); o != "" {
 		w.Header().Set("Access-Control-Allow-Origin", o)
 		w.Header().Set("Vary", "Origin")

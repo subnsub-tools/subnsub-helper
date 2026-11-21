@@ -136,7 +136,10 @@ for its own password. It never starts or configures one. MON_SCREEN=off turns
 the screen off while leaving the terminal on. A Mac's screen is shown only
 where out, the Mac app, is installed; there out can show it itself, as video
 with the Mac's sound, once its own switch for that is on: the helper hands
-out the session's streams and reads none of them.
+out the session's streams and reads none of them. A primary helper also keeps
+the files out is asked to give a link to, and answers each link on its
+Tailscale address to whoever holds it (10 GB at most, MON_HOST_MAX_GB for
+another amount; MON_HOST=off for none).
 
 A portable copy is a dashboard's access lent to a command line for a while
 (the Monitor page: a machine's terminal → Create a copy). On the computer that
