@@ -1022,6 +1022,12 @@ type filesArgs struct {
 	Forget bool        `json:"forget"`
 	// speed-run (speedpeer.go): seconds each way.
 	Secs int `json:"secs"`
+	// serve-add, serve-stop (serve.go): the tailnet port; serve-stop: the
+	// route of the handler to take off (none: the whole port) and, with
+	// Dir, what it must still serve.
+	Port   int    `json:"port"`
+	Route  string `json:"route"`
+	Target string `json:"target"`
 }
 
 // runFilesCommand is a signed files command, from the tunnel's command door
@@ -1099,6 +1105,13 @@ func runFilesCommand(c consoleCmd, peer key.NodePublic, hasPeer bool, signer ed2
 		out = body
 	case "speed-key", "speed-run", "speed-net", "speed-status", "speed-stop":
 		body, code := runSpeedCommand(c.Target, signer, arg)
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		out = body
+	case "serve-list", "serve-add", "serve-stop":
+		body, code := runServeCommand(c.Target, arg)
 		if code != "" {
 			res.Error = code
 			return res

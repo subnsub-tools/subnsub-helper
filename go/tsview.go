@@ -23,6 +23,7 @@ package main
 // private network is not the relay's to hold.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -161,6 +162,13 @@ var errTSAbsent = errors.New("tailscaled not reachable")
 // tsLocal asks the LocalAPI one thing: the answer's status and body, or
 // errTSAbsent when nothing answered.
 func tsLocal(ctx context.Context, method, path string) (int, []byte, error) {
+	code, b, _, err := tsLocalDo(ctx, method, path, nil, nil)
+	return code, b, err
+}
+
+// tsLocalDo is tsLocal with a body to send and headers both ways: the serve
+// config is written back under the ETag it was read with (serve.go).
+func tsLocalDo(ctx context.Context, method, path string, body []byte, hdr map[string]string) (int, []byte, http.Header, error) {
 	// Any failure to reach it, whatever the platform calls it (a missing
 	// socket, a pipe nobody serves, the app not running), is "absent".
 	var dialFailed atomic.Bool
@@ -175,30 +183,37 @@ func tsLocal(ctx context.Context, method, path string) (int, []byte, error) {
 		DisableKeepAlives: true,
 	}
 	defer tr.CloseIdleConnections()
-	req, err := http.NewRequestWithContext(ctx, method, "http://local-tailscaled.sock/localapi/v0/"+path, nil)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://local-tailscaled.sock/localapi/v0/"+path, rd)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	req.Header.Set("Tailscale-Cap", strconv.Itoa(int(tailcfg.CurrentCapabilityVersion)))
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
 	if tok := tsLocalToken(); tok != "" {
 		req.SetBasicAuth("", tok)
 	}
 	res, err := (&http.Client{Transport: tr}).Do(req)
 	if err != nil {
 		if dialFailed.Load() {
-			return 0, nil, errTSAbsent
+			return 0, nil, nil, errTSAbsent
 		}
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer res.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(res.Body, tsViewReadMax+1))
 	if err != nil {
-		return res.StatusCode, nil, err
+		return res.StatusCode, nil, res.Header, err
 	}
 	if len(b) > tsViewReadMax {
-		return res.StatusCode, nil, errors.New("answer too large")
+		return res.StatusCode, nil, res.Header, errors.New("answer too large")
 	}
-	return res.StatusCode, b, nil
+	return res.StatusCode, b, res.Header, nil
 }
 
 var tsViewCache struct {

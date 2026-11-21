@@ -179,6 +179,11 @@ const (
 	// network, devices and access rules (helper tsview.go), for the map of
 	// who reaches whom. Named to an allowlisted browser; read-only.
 	CapTailnetMap = "tailnet-map"
+	// CapServe: the Demos tab may read the web pages this machine serves on
+	// its tailnet (Tailscale's serve config), serve a folder of its own on a
+	// port there, and stop one (helper serve.go) — the console's grant, as
+	// Files is, since a folder served is first a folder written.
+	CapServe = "serve"
 	// CapScreen: the machine's own VNC server, carried through this tunnel
 	// to the page's viewer (helper screen.go). The console's switch and a
 	// pinned key, to an allowlisted browser; MON_SCREEN=off turns it off.

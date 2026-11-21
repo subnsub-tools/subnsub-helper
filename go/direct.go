@@ -427,6 +427,9 @@ func runDirect(ctx context.Context) {
 	// Copies from another computer that were under way when this helper
 	// last stopped (filesfetch.go).
 	fetchResume()
+	// The folders this helper serves on the tailnet for the Demos tab
+	// (serve.go), served again.
+	serveStart(ctx)
 	conf := configDir()
 	if conf == "" {
 		warnf("direct: no home directory, cannot keep a tunnel identity")
@@ -865,6 +868,8 @@ func directCapsFor(r *http.Request) []string {
 					caps = append(caps, transport.CapSpeedPeer)
 					// Its own road to the internet (speednet.go).
 					caps = append(caps, transport.CapSpeedNet)
+					// The pages it serves on its tailnet (serve.go).
+					caps = append(caps, transport.CapServe)
 				}
 				return caps
 			}
