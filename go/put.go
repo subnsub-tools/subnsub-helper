@@ -36,6 +36,8 @@ package main
 //	{"op":"open","agent":"…"}  → {"ok":true,"route":"direct|derp|"} then put's bytes,
 //	                             or {"ok":false,"error":"<code>"}
 //	{"op":"accept"}            → waits; {"from":"…","name":"…"} then put's bytes
+//	{"op":"screen"}            → waits; {"from":"page"} then a screen session's
+//	                             two streams, the page's own (screen.go)
 //
 // put keeps a few accepts waiting, so a stream from another Mac is handed to
 // one at once; with none waiting (put is not running) the other side is told
@@ -103,15 +105,19 @@ const (
 
 var putAgentRE = regexp.MustCompile(`^[A-Za-z0-9_-]{4,40}$`)
 
-// Where put runs at all; a test turns it on elsewhere.
-var putSupported = runtime.GOOS == "darwin"
+// Where put runs at all: a Mac. A test turns it on elsewhere, in process or,
+// for a test that runs the helper itself against a stand-in for the app
+// (cmd/outmock), with MON_OUT_TEST=1.
+var putSupported = runtime.GOOS == "darwin" || os.Getenv("MON_OUT_TEST") == "1"
 
 // Where put is installed: its install line and its updater keep it in
 // Applications. A test points it elsewhere.
 var putAppPaths = func() []string {
-	paths := []string{"/Applications/put.app"}
+	// The app is out; it was put until its 0.1.49, and a copy from before
+	// moves itself to the new name when it next starts.
+	paths := []string{"/Applications/out.app", "/Applications/put.app"}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		paths = append(paths, filepath.Join(home, "Applications", "put.app"))
+		paths = append(paths, filepath.Join(home, "Applications", "out.app"), filepath.Join(home, "Applications", "put.app"))
 	}
 	return paths
 }
@@ -147,6 +153,24 @@ func putPresence() (bool, error) {
 		}
 	}
 	return false, failed
+}
+
+// putHere says whether put is on this Mac now: its app is in Applications,
+// or it holds a connection at put.sock this moment. Unlike putPresence it
+// remembers nothing: a Mac whose put was removed stops showing its screen
+// (screen.go) without the helper being started again.
+func putHere() bool {
+	if !putSupported {
+		return false
+	}
+	for _, p := range putAppPaths() {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	putLocal.Lock()
+	defer putLocal.Unlock()
+	return len(putLocal.accepts)+len(putLocal.screens) > 0
 }
 
 // putPeer is one of the owner's other Macs as the page described it.
@@ -658,6 +682,47 @@ var putLocal struct {
 	sync.Mutex
 	on      bool
 	accepts []net.Conn
+	// Connections put keeps waiting for a screen session from the Monitor
+	// page (screen.go): the app shows this Mac's screen on it.
+	screens []net.Conn
+}
+
+// A screen is one page's at a time; put keeps a spare waiting.
+const putMaxScreens = 4
+
+// putParkScreen keeps a connection of put's waiting for a screen session.
+func putParkScreen(c net.Conn) {
+	putLocal.Lock()
+	defer putLocal.Unlock()
+	if len(putLocal.screens) >= putMaxScreens {
+		putLocal.screens[0].Close()
+		putLocal.screens = putLocal.screens[1:]
+	}
+	putLocal.screens = append(putLocal.screens, c)
+}
+
+// putTakeScreen hands a waiting connection the word that a page's screen
+// session is its own from here on, and takes it out of the pool: nil where
+// put keeps none waiting (it is not running, or its switch for the screen is
+// off). One whose put has gone away fails the write and the next is tried.
+func putTakeScreen() net.Conn {
+	for {
+		putLocal.Lock()
+		if len(putLocal.screens) == 0 {
+			putLocal.Unlock()
+			return nil
+		}
+		c := putLocal.screens[0]
+		putLocal.screens = putLocal.screens[1:]
+		putLocal.Unlock()
+		c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Write([]byte("{\"from\":\"page\"}\n")); err != nil {
+			c.Close()
+			continue
+		}
+		c.SetWriteDeadline(time.Time{})
+		return c
+	}
 }
 
 func putSockPath() string {
@@ -817,7 +882,7 @@ func servePutLocal(c net.Conn) {
 	// Only the user's own programs reach this socket, and put asks these: it
 	// is on this Mac. A hint rather than proof of the app, as the socket is.
 	switch ask.Op {
-	case "peers", "open", "accept":
+	case "peers", "open", "accept", "screen":
 		putSeen.Store(true)
 	}
 	switch ask.Op {
@@ -842,6 +907,13 @@ func servePutLocal(c net.Conn) {
 			return
 		}
 		putPark(c)
+	case "screen":
+		if r.Buffered() > 0 {
+			// Nothing may follow until the session has come.
+			c.Close()
+			return
+		}
+		putParkScreen(c)
 	case "open":
 		putOpen(c, r, ask.Agent)
 	default:

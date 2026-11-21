@@ -832,8 +832,13 @@ func directCapsFor(r *http.Request) []string {
 				// The machine's screen (screen.go): the console's grant, to a
 				// browser on the list and not a portable copy, where a key is
 				// pinned.
-				if screenEnabled() && loadTrust().sealed {
+				// On a Mac, only where out is installed, and there out can
+				// show the screen itself (screen.go, put.go).
+				if screenEnabled() && loadTrust().sealed && screenHostOK() {
 					caps = append(caps, transport.CapScreen)
+					if putSupported {
+						caps = append(caps, transport.CapScreenOut)
+					}
 				}
 				// put on this Mac reaching put on the owner's other Macs
 				// (put.go): where put runs and a key is pinned, the list
@@ -1023,7 +1028,13 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 			releaseCmd()
 			res = consoleResult{ID: c.ID, Kind: "screen", Code: -1, Error: "not-allowed"}
 			if peer, ok := transport.PeerFromContext(r.Context()); ok && clone == nil {
-				if tok, why := h.screens.open(peer, commandSigner(c, id, loadTrust())); why != "" {
+				// cmd "out" asks for the screen as out shows it (put.go);
+				// anything else is the VNC server's bytes.
+				mode := ""
+				if c.Cmd == "out" {
+					mode = "out"
+				}
+				if tok, why := h.screens.open(peer, commandSigner(c, id, loadTrust()), mode); why != "" {
 					res.Error = why
 				} else {
 					res = consoleResult{ID: c.ID, Kind: "screen", Code: 0, Out: tok}

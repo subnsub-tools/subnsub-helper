@@ -71,6 +71,10 @@ func putReset() {
 		c.Close()
 	}
 	putLocal.accepts = nil
+	for _, c := range putLocal.screens {
+		c.Close()
+	}
+	putLocal.screens = nil
 	putLocal.Unlock()
 }
 

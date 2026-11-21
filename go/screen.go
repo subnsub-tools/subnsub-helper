@@ -84,7 +84,9 @@ type screenSess struct {
 	peer  key.NodePublic
 	// The pinned key that signed the opening: unpinning it ends the session.
 	signer ed25519.PublicKey
-	conn   net.Conn
+	// The VNC server's connection, or out's (put.go), which is read and
+	// written the same way.
+	conn net.Conn
 	// The server's version line, read to know it is VNC, sent to the page
 	// before anything else.
 	hello []byte
@@ -142,6 +144,15 @@ func screenOff() bool {
 // switch, and the screen's own.
 func screenEnabled() bool { return consoleEnabled() && !screenOff() }
 
+// screenHostOK is whether this machine's screen may be shown at all: on a
+// Mac, only where out is installed.
+func screenHostOK() bool {
+	if !putSupported {
+		return true
+	}
+	return putHere()
+}
+
 // screenPort is the VNC server's port on this machine: 5900, or
 // MON_SCREEN_PORT (a server on display :1 listens on 5901).
 func screenPort() int {
@@ -187,12 +198,24 @@ func (hub *screenHub) dial() (net.Conn, []byte, error) {
 
 // open connects a session for peer. The caller has verified the command's
 // signature and that a key is pinned. Returns the token, or a refusal code.
-func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey) (string, string) {
+//
+// mode "out" is the screen shown by out, the Mac app (put.go): the session's
+// two streams are handed to a connection out keeps waiting, and carry its
+// frames instead of a VNC server's bytes. Any other mode is VNC. On a Mac
+// either takes out being installed (user 2026-11-21: only a Mac with out is
+// shown).
+func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey, mode string) (string, string) {
 	if !consoleEnabled() {
 		return "", "console-off"
 	}
 	if screenOff() {
 		return "", "screen-off"
+	}
+	if !screenHostOK() {
+		return "", "no-out"
+	}
+	if mode == "out" && !putSupported {
+		return "", "no-out"
 	}
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -205,9 +228,21 @@ func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey) (strin
 	}
 	hub.pending++
 	hub.mu.Unlock()
-	conn, hello, err := hub.dial()
+	var conn net.Conn
+	var hello []byte
+	var err error
+	if mode == "out" {
+		conn = putTakeScreen()
+	} else {
+		conn, hello, err = hub.dial()
+	}
 	hub.mu.Lock()
 	hub.pending--
+	if mode == "out" && conn == nil {
+		hub.mu.Unlock()
+		// out is not running, or its switch for the screen is off.
+		return "", "out-not-ready"
+	}
 	if err != nil {
 		hub.mu.Unlock()
 		warnf("screen: no VNC server at port %d: %v", screenPort(), err)
@@ -361,8 +396,12 @@ func (h *directHandler) screenOut(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	rc.SetWriteDeadline(time.Now().Add(screenWriteWait))
-	if _, err := w.Write(s.hello); err != nil {
-		return
+	// A VNC server's version line was read to know it is one; out's stream
+	// has nothing of the kind.
+	if len(s.hello) > 0 {
+		if _, err := w.Write(s.hello); err != nil {
+			return
+		}
 	}
 	if err := rc.Flush(); err != nil {
 		return

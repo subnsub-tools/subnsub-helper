@@ -133,7 +133,10 @@ may open a terminal may also see and work this machine's screen: the helper
 connects to the VNC server already running here (127.0.0.1:5900, or the port
 MON_SCREEN_PORT names) and carries its bytes both ways, and that server asks
 for its own password. It never starts or configures one. MON_SCREEN=off turns
-the screen off while leaving the terminal on.
+the screen off while leaving the terminal on. A Mac's screen is shown only
+where out, the Mac app, is installed; there out can show it itself, as video
+with the Mac's sound, once its own switch for that is on: the helper hands
+out the session's streams and reads none of them.
 
 A portable copy is a dashboard's access lent to a command line for a while
 (the Monitor page: a machine's terminal → Create a copy). On the computer that

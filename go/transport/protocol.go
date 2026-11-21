@@ -188,6 +188,11 @@ const (
 	// to the page's viewer (helper screen.go). The console's switch and a
 	// pinned key, to an allowlisted browser; MON_SCREEN=off turns it off.
 	CapScreen = "screen"
+	// CapScreenOut: out, the Mac app, shows this Mac's screen itself: video,
+	// the Mac's sound, the pointer, keys and clipboard, as frames on the
+	// screen session's two streams (helper screen.go and put.go). Where
+	// CapScreen is, on a Mac; on a Mac both take out being installed.
+	CapScreenOut = "screen-out"
 	// CapPut: put, the voice-typing app, runs here and reaches put on the
 	// owner's other Macs through this helper (main package, put.go); the
 	// page asks put-key and sends the list of those Macs.
