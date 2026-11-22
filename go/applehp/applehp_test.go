@@ -749,3 +749,31 @@ func TestBuildVirtualDisplayModes(t *testing.T) {
 		}
 	}
 }
+
+// A display at a pixel a point is asked for with an even number of pixels
+// each way (displayConfig): the host sends no picture of any other.
+func TestPlainDisplayIsEven(t *testing.T) {
+	mode := func(msg []byte) [4]uint32 {
+		const d = 0x0c
+		e := d + 0x9c + 28*int(binary.BigEndian.Uint16(msg[d+0x92:d+0x94]))
+		var got [4]uint32
+		for i := range got {
+			got[i] = binary.BigEndian.Uint32(msg[e+4*i : e+4*i+4])
+		}
+		return got
+	}
+	for _, c := range []struct {
+		scale float64
+		form  int
+		want  [4]uint32
+	}{
+		{2, formPlain, [4]uint32{932, 412, 932, 412}},
+		{1, formPointsFirst, [4]uint32{932, 412, 932, 412}},
+		{2, formPointsFirst, [4]uint32{933, 413, 467, 207}},
+		{2, formPixelsFirst, [4]uint32{1866, 826, 933, 413}},
+	} {
+		if got := mode(displayConfig(933, 413, c.scale, false, c.form)); got != c.want {
+			t.Fatalf("933x413 at %v in form %d: mode %v, want %v", c.scale, c.form, got, c.want)
+		}
+	}
+}

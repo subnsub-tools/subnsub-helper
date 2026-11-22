@@ -332,7 +332,10 @@ func displayConfig(w, h int, scale float64, hdr bool, form int) []byte {
 	const name = "subnsub Virtual Display"
 	switch {
 	case form == formPlain || scale <= 1:
-		return BuildVirtualDisplay(w, h, 1, hdr, name)
+		// An even number of pixels each way: asked for 933x412, the host made
+		// that display and sent no picture of it (seen 2026-11-22, macOS
+		// 15.8.3; 932x412 it sends).
+		return BuildVirtualDisplay(w&^1, h&^1, 1, hdr, name)
 	case form == formPixelsFirst:
 		return BuildVirtualDisplay(int(float64(w)*scale+0.5), int(float64(h)*scale+0.5), scale, hdr, name)
 	}
