@@ -1,0 +1,398 @@
+package applehp
+
+import (
+	"bytes"
+	"compress/zlib"
+	"context"
+	"encoding/binary"
+	"io"
+	"net"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func freeUDPPair(t *testing.T) (int, int) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		a, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := a.LocalAddr().(*net.UDPAddr).Port
+		b, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: p + 1})
+		a.Close()
+		if err != nil {
+			continue
+		}
+		b.Close()
+		return p, p + 1
+	}
+	t.Fatal("no two free UDP ports in a row")
+	return 0, 0
+}
+
+// testFrames is a stream of made-up pictures: a key frame too long for one
+// packet, then pictures that are not key frames.
+func testFrames() (sps, pps []byte, frames [][][]byte) {
+	sps = append([]byte{0x67}, AddEmulationPrevention(encodeTestSPS(100, 52, 8))...)
+	pps = []byte{0x68, 0xce, 0x38, 0x80}
+	idr := append([]byte{0x65, 0x88}, bytes.Repeat([]byte{0xab}, 5000)...)
+	p1 := append([]byte{0x41, 0xe0}, bytes.Repeat([]byte{0xcd}, 300)...)
+	p2 := append([]byte{0x41, 0xe0}, bytes.Repeat([]byte{0xef}, 1500)...)
+	return sps, pps, [][][]byte{{idr}, {p1}, {p2}, {p1}, {p2}, {p1}}
+}
+
+type gathered struct {
+	mu       sync.Mutex
+	configs  int
+	frames   int
+	keys     int
+	firstKey bool
+	idrLen   int
+	audio    [][]byte
+	stores   int
+	cursor   []byte
+	selects  []uint32
+	layouts  [][4]int
+	clips    []string
+}
+
+func (g *gathered) handler() Handler {
+	return Handler{
+		VideoConfig: func(sps, pps []byte) { g.mu.Lock(); g.configs++; g.mu.Unlock() },
+		VideoFrame: func(ts uint32, key bool, nalus [][]byte) {
+			g.mu.Lock()
+			if g.frames == 0 {
+				g.firstKey = key
+			}
+			g.frames++
+			if key {
+				g.keys++
+				g.idrLen = len(nalus[0])
+			}
+			g.mu.Unlock()
+		},
+		Audio: func(ts uint32, seq uint16, pt byte, payload []byte) {
+			g.mu.Lock()
+			if len(g.audio) < 64 {
+				g.audio = append(g.audio, payload)
+			}
+			g.mu.Unlock()
+		},
+		CursorStore: func(id uint32, hx, hy, w, h int, rgba []byte) {
+			g.mu.Lock()
+			g.stores++
+			g.cursor = append([]byte{byte(hx), byte(hy), byte(w), byte(h)}, rgba...)
+			g.mu.Unlock()
+		},
+		CursorSelect: func(id uint32) { g.mu.Lock(); g.selects = append(g.selects, id); g.mu.Unlock() },
+		Layout: func(sw, sh, bw, bh int) {
+			g.mu.Lock()
+			g.layouts = append(g.layouts, [4]int{sw, sh, bw, bh})
+			g.mu.Unlock()
+		},
+		Clipboard: func(s string) { g.mu.Lock(); g.clips = append(g.clips, s); g.mu.Unlock() },
+	}
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(8 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestRunAgainstMockHost(t *testing.T) {
+	sps, pps, frames := testFrames()
+	cp, vp := freeUDPPair(t)
+	host := &MockHost{Username: "alice", Password: "pw", Width: 1280, Height: 720, SPS: sps, PPS: pps, Frames: frames, FPS: 30,
+		Audio: [][]byte{{1, 2, 3}, {4, 5, 6, 7}}, ClientCtrlPort: cp, ClientVideoPort: vp}
+	if err := host.Listen("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+
+	cfg := DefaultConfig()
+	cfg.Host = "127.0.0.1"
+	cfg.Port = host.Port()
+	cfg.Username, cfg.Password = "alice", "pw"
+	cfg.UDPBindAddr = "127.0.0.1"
+	cfg.UDPCtrlPort, cfg.UDPVideoPort = cp, vp
+	cfg.WarmupTCP = false
+	cfg.AudioEnabled = true
+	cfg.Curtain = true
+	cfg.Width, cfg.Height = 1280, 720
+	cfg.MaxBitrate = 8_000_000
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	sess, err := Connect(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+	if sess.CanvasW != 1280 || sess.CanvasH != 720 {
+		t.Fatalf("canvas %dx%d", sess.CanvasW, sess.CanvasH)
+	}
+	g := &gathered{}
+	runCtx, stopRun := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(runCtx, g.handler()) }()
+
+	waitFor(t, "pictures and sound", func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.frames >= 8 && g.keys >= 1 && len(g.audio) >= 4 && g.stores == 1 && len(g.selects) >= 2 && len(g.layouts) >= 1
+	})
+	g.mu.Lock()
+	if !g.firstKey || g.configs != 1 || g.idrLen != 5002 {
+		t.Fatalf("first frame key=%v configs=%d idr=%d", g.firstKey, g.configs, g.idrLen)
+	}
+	if !bytes.Equal(g.audio[0][:1], []byte{1}) && !bytes.Equal(g.audio[0][:1], []byte{4}) {
+		t.Fatalf("audio payload %x", g.audio[0])
+	}
+	// Hot spot 1,1; 2 by 2; red at half alpha.
+	if want := append([]byte{1, 1, 2, 2}, bytes.Repeat([]byte{0xff, 0, 0, 0x80}, 4)...); !bytes.Equal(g.cursor, want) {
+		t.Fatalf("cursor %x", g.cursor)
+	}
+	if g.layouts[0] != [4]int{1280, 720, 1280, 720} {
+		t.Fatalf("layout %v", g.layouts[0])
+	}
+	g.mu.Unlock()
+	if _, arms, _ := host.Counts(); arms < 2 {
+		t.Fatalf("armed %d times, want one at the start and one for the layout", arms)
+	}
+
+	// What a viewer sends arrives as it was sent.
+	if err := sess.SendPointer(1, 640, 360); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.SendKey(true, 0xff0d); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.SendKey(false, 0xff0d); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.SendCutText("café"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.SendCutText("\u4f60\u597d"); err == nil {
+		t.Fatal("text outside Latin-1 was sent")
+	}
+	waitFor(t, "the viewer's input", func() bool {
+		return len(host.Pointers()) == 1 && len(host.Keys()) == 2 && len(host.CutTexts()) == 1
+	})
+	if p := host.Pointers()[0]; p != (MockPointer{1, 640, 360}) {
+		t.Fatalf("pointer %+v", p)
+	}
+	if k := host.Keys(); !k[0].Down || k[0].Keysym != 0xff0d || k[1].Down {
+		t.Fatalf("keys %+v", k)
+	}
+	if c := host.CutTexts()[0]; c != "café" {
+		t.Fatalf("cut text %q", c)
+	}
+
+	// The host's clipboard, twice: the second rides the same zlib stream or
+	// its own, and is read either way.
+	for _, s := range []string{"one \u4f60\u597d", "two"} {
+		if err := host.SendClipboard(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "the clipboard", func() bool { g.mu.Lock(); defer g.mu.Unlock(); return len(g.clips) == 2 })
+	g.mu.Lock()
+	if g.clips[0] != "one \u4f60\u597d" || g.clips[1] != "two" {
+		t.Fatalf("clipboard %q", g.clips)
+	}
+	keysBefore, framesBefore := g.keys, g.frames
+	g.mu.Unlock()
+
+	// A new size: asked for, answered with a layout, offered for again, and
+	// the pictures come back from a key frame.
+	if err := sess.Resize(1600, 900, 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the resized stream", func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		last := g.layouts[len(g.layouts)-1]
+		return last == [4]int{1600, 900, 1600, 900} && g.keys > keysBefore && g.frames > framesBefore+5
+	})
+	if offers, _, _ := host.Counts(); offers != 2 {
+		t.Fatalf("offers %d, want 2", offers)
+	}
+	if r := host.Resizes(); len(r) < 2 || r[len(r)-1] != [2]int{1600, 900} {
+		t.Fatalf("resizes %v", r)
+	}
+	sess.runMu.Lock()
+	cw, ch := sess.CanvasW, sess.CanvasH
+	sess.runMu.Unlock()
+	if cw != 1600 || ch != 900 {
+		t.Fatalf("canvas after resize %dx%d", cw, ch)
+	}
+	if st := sess.Stats(); st.VideoBad != 0 || st.AudioBad != 0 || st.Frames == 0 {
+		t.Fatalf("stats %+v", st)
+	}
+
+	stopRun()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancel: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
+func TestRunEndsWithTheHost(t *testing.T) {
+	sps, pps, frames := testFrames()
+	cp, vp := freeUDPPair(t)
+	host := &MockHost{Username: "alice", Password: "pw", SPS: sps, PPS: pps, Frames: frames, ClientCtrlPort: cp, ClientVideoPort: vp}
+	if err := host.Listen("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	cfg := DefaultConfig()
+	cfg.Host, cfg.Port = "127.0.0.1", host.Port()
+	cfg.Username, cfg.Password = "alice", "wrong"
+	cfg.UDPBindAddr, cfg.UDPCtrlPort, cfg.UDPVideoPort = "127.0.0.1", cp, vp
+	cfg.WarmupTCP = false
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := Connect(ctx, cfg); err == nil {
+		t.Fatal("a wrong password signed in")
+	}
+	cfg.Password = "pw"
+	sess, err := Connect(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+	if err := sess.Resize(1600, 900, 1); err == nil {
+		t.Fatal("a session on the physical display took a resize")
+	}
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(ctx, Handler{}) }()
+	time.Sleep(300 * time.Millisecond)
+	host.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run ended without an error when the host went")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not notice the host going")
+	}
+}
+
+func TestChunkInflater(t *testing.T) {
+	a := bytes.Repeat([]byte{1, 2, 3, 4}, 50)
+	b := bytes.Repeat([]byte{9, 8, 7}, 40)
+	// One stream, flushed after each piece.
+	var zb bytes.Buffer
+	zw := zlib.NewWriter(&zb)
+	zw.Write(a)
+	zw.Flush()
+	p1 := append([]byte(nil), zb.Bytes()...)
+	zb.Reset()
+	zw.Write(b)
+	zw.Flush()
+	p2 := append([]byte(nil), zb.Bytes()...)
+	c := &chunkInflater{}
+	if got, err := c.inflate(p1, len(a)); err != nil || !bytes.Equal(got, a) {
+		t.Fatalf("first piece: %v", err)
+	}
+	if got, err := c.inflate(p2, len(b)); err != nil || !bytes.Equal(got, b) {
+		t.Fatalf("second piece of one stream: %v", err)
+	}
+	// A stream per piece.
+	whole := func(d []byte) []byte {
+		var z bytes.Buffer
+		w := zlib.NewWriter(&z)
+		w.Write(d)
+		w.Close()
+		return z.Bytes()
+	}
+	c = &chunkInflater{}
+	if got, err := c.inflate(whole(a), len(a)); err != nil || !bytes.Equal(got, a) {
+		t.Fatalf("first whole stream: %v", err)
+	}
+	if got, err := c.inflate(whole(b), len(b)); err != nil || !bytes.Equal(got, b) {
+		t.Fatalf("second whole stream: %v", err)
+	}
+	if _, err := c.inflate([]byte{1, 2, 3}, 10); err == nil {
+		t.Fatal("rubbish inflated")
+	}
+}
+
+func TestParseUpdateAcrossRecords(t *testing.T) {
+	host := &MockHost{Width: 800, Height: 600, BackingW: 1600, BackingH: 1200}
+	msg := host.metadata()
+	rc, err := NewRecordCipher(make([]byte, 36), make([]byte, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The layout's arming is written somewhere: a connection nobody reads.
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			io.Copy(io.Discard, c)
+			c.Close()
+		}
+	}()
+	tc, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tc.Close()
+	s := &Session{Cipher: rc, tcp: tc.(*net.TCPConn)}
+	// Cut anywhere, the head asks for more and hands nothing over.
+	for cut := 4; cut < len(msg); cut += 7 {
+		var n int
+		h := Handler{CursorSelect: func(uint32) { n++ }, CursorStore: func(uint32, int, int, int, int, []byte) { n++ },
+			Layout: func(int, int, int, int) { n++ }}
+		if _, st := s.parseUpdate(msg[:cut], &runState{}, h); st != parseMore {
+			t.Fatalf("cut at %d of %d: status %v", cut, len(msg), st)
+		}
+		if n != 0 {
+			t.Fatalf("cut at %d: %d events handed over early", cut, n)
+		}
+	}
+	// Whole, it is all handed over, in order.
+	var got []string
+	h := Handler{
+		Layout:       func(sw, sh, bw, bh int) { got = append(got, "layout") },
+		CursorStore:  func(uint32, int, int, int, int, []byte) { got = append(got, "store") },
+		CursorSelect: func(uint32) { got = append(got, "select") },
+	}
+	rs := &runState{}
+	if n, st := s.parseUpdate(msg, rs, h); st != parseOK || n != len(msg) {
+		t.Fatalf("whole update: took %d of %d, status %v", n, len(msg), st)
+	}
+	if want := "layout store select select"; strings.Join(got, " ") != want {
+		t.Fatalf("events %q, want %q", strings.Join(got, " "), want)
+	}
+	if rs.scaledW != 800 || rs.backingH != 1200 {
+		t.Fatalf("layout kept as %dx%d / %dx%d", rs.scaledW, rs.scaledH, rs.backingW, rs.backingH)
+	}
+	// An encoding nobody knows ends the update there, keeping what came
+	// before it.
+	bad := append([]byte(nil), msg...)
+	binary.BigEndian.PutUint16(bad[2:4], 5)
+	bad = append(bad, make([]byte, 12)...)
+	binary.BigEndian.PutUint32(bad[len(bad)-4:], 0x7777)
+	var n int
+	if _, st := s.parseUpdate(bad, &runState{}, Handler{CursorSelect: func(uint32) { n++ }}); st != parseLost || n != 2 {
+		t.Fatalf("unknown encoding: status %v, %d cursor events", st, n)
+	}
+}

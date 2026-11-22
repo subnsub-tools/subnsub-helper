@@ -38,6 +38,9 @@ package main
 //	{"op":"accept"}            → waits; {"from":"…","name":"…"} then put's bytes
 //	{"op":"screen"}            → waits; {"from":"page"} then a screen session's
 //	                             two streams, the page's own (screen.go)
+//	{"op":"screen-hp"}         → {"ok":true}, then this Mac's own Screen Sharing
+//	                             as out's frames, the helper signing in to it
+//	                             (screenhp.go)
 //
 // put keeps a few accepts waiting, so a stream from another Mac is handed to
 // one at once; with none waiting (put is not running) the other side is told
@@ -888,7 +891,7 @@ func servePutLocal(c net.Conn) {
 	// Only the user's own programs reach this socket, and put asks these: it
 	// is on this Mac. A hint rather than proof of the app, as the socket is.
 	switch ask.Op {
-	case "peers", "open", "accept", "screen", "host", "unhost":
+	case "peers", "open", "accept", "screen", "screen-hp", "host", "unhost":
 		putSeen.Store(true)
 	}
 	switch ask.Op {
@@ -906,6 +909,9 @@ func servePutLocal(c net.Conn) {
 			"tunnel": directAddress() != "", "version": helperVersion,
 			// Whether a Shelf item can be given a link here (host.go).
 			"host": hostAvailable(),
+			// Whether this Mac's screen is shown through its Screen Sharing
+			// (screenhp.go).
+			"screenhp": screenHPAvailable(),
 		})
 		c.Close()
 	case "accept":
@@ -922,6 +928,13 @@ func servePutLocal(c net.Conn) {
 			return
 		}
 		putParkScreen(c)
+	case "screen-hp":
+		if r.Buffered() > 0 {
+			// Nothing may follow until the answer has come.
+			c.Close()
+			return
+		}
+		screenHPServe(c)
 	case "open":
 		putOpen(c, r, ask.Agent)
 	case "host", "unhost":
