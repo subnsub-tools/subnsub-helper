@@ -396,6 +396,8 @@ func dialPut(t *testing.T, ask string) (net.Conn, *bufio.Reader, map[string]any)
 // stops, a healthy one answers the upgrade as the peer's helper does.
 type fakeTunnel struct {
 	stale, partial bool
+	// ping: what its disco ping answers (an error when nil).
+	ping *ipnstate.PingResult
 	// tn: a tailnet road its answer names; asked: the head of the last ask.
 	tn            string
 	asked         string
@@ -448,6 +450,9 @@ func (f *fakeTunnel) DialTCPPort(ctx context.Context, port uint16) (net.Conn, er
 }
 
 func (f *fakeTunnel) DiscoPing(ctx context.Context) (*ipnstate.PingResult, error) {
+	if f.ping != nil {
+		return f.ping, nil
+	}
 	return nil, errors.New("fake")
 }
 

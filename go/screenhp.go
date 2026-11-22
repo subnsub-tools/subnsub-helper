@@ -27,7 +27,8 @@ package main
 //	to the viewer   1 status (JSON): hello {v 3, name, user, codecs,
 //	                  signin}, connecting, live {w h: the display in
 //	                  points, cw ch: the picture in pixels, own, audio,
-//	                  input}, end {why: auth, no-vnc (Screen Sharing is
+//	                  input}, stats every two seconds {fps, kbps, lost,
+//	                  keyframes, bad, audio, dropped, asks}, end {why: auth, no-vnc (Screen Sharing is
 //	                  off), no-hp, no-media, busy, failed, closed}
 //	                2 video configuration: codec (1, H.264), then avcC
 //	                3 video frame: flags (1 = key), timestamp (90 kHz),
@@ -43,6 +44,7 @@ package main
 //	                  pixels w h, u16 each
 //	from the viewer 1 control (JSON): open {codecs, audio, kbps, user,
 //	                  password, own, w, h, scale}, size {w h scale}, kbps,
+//	                  mode {observe} (told to the Mac, as its own viewer does),
 //	                  key, clip {text} (Latin-1 only: Screen Sharing takes no
 //	                  other from a client; status clip {ok: false} when it
 //	                  did not go), text {text}
@@ -373,6 +375,7 @@ type hpCommand struct {
 	H        int      `json:"h"`
 	Scale    float64  `json:"scale"`
 	Text     string   `json:"text"`
+	Observe  bool     `json:"observe"`
 }
 
 // hpRoute is one way of reaching the Screen Sharing on this machine: which
@@ -590,7 +593,10 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		warnf("screen: stream opened (%s, %dx%d)", rt.name, cw, ch)
 		p.status(map[string]any{"s": "live", "w": sess.ServerW, "h": sess.ServerH, "cw": cw, "ch": ch,
 			"own": o.Own, "audio": audio, "input": true, "codec": "avc"})
+		stats := make(chan struct{})
+		go p.stats(sess, stats)
 		err = <-done
+		close(stats)
 		rcancel()
 		_ = sess.Close()
 		p.mu.Lock()
@@ -603,6 +609,41 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		return
 	}
 	p.status(map[string]any{"s": "end", "why": why})
+}
+
+// stats tells the viewer what the stream did, every two seconds, until done:
+// pictures and kilobits a second, what was lost, key frames, packets that did
+// not authenticate, sound packets a second, pictures not sent because the
+// viewer was behind, and key frames asked for.
+func (p *hpScreen) stats(sess *applehp.Session, done <-chan struct{}) {
+	const every = 2 * time.Second
+	t := time.NewTicker(every)
+	defer t.Stop()
+	last := sess.Stats()
+	for {
+		select {
+		case <-done:
+			return
+		case <-p.ctx.Done():
+			return
+		case <-t.C:
+		}
+		st := sess.Stats()
+		p.mu.Lock()
+		dropped := p.dropped
+		p.mu.Unlock()
+		secs := every.Seconds()
+		b, err := json.Marshal(map[string]any{"s": "stats",
+			"fps":   float64(st.Frames-last.Frames) / secs,
+			"kbps":  float64(st.Bytes-last.Bytes) * 8 / 1000 / secs,
+			"audio": float64(st.AudioPackets-last.AudioPackets) / secs,
+			"lost":  st.FramesLost, "keyframes": st.Keyframes, "bad": st.VideoBad, "dropped": dropped, "asks": st.KeyAsks})
+		last = st
+		if err == nil {
+			// Not waited for: the next one says the same, newer.
+			p.push(swToStatus, b)
+		}
+	}
 }
 
 // input takes what the viewer sent: whole frames are acted on, the rest
@@ -700,6 +741,10 @@ func (p *hpScreen) take(f hpFrame, port int) bool {
 		case "key":
 			if sess != nil {
 				sess.RequestKeyframe()
+			}
+		case "mode":
+			if sess != nil {
+				_ = sess.SetMode(!o.Observe)
 			}
 		case "kbps":
 			// The viewer's quality, at once: the media is offered again under

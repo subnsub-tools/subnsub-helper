@@ -62,6 +62,7 @@ type MockHost struct {
 	pointers []MockPointer
 	keys     []MockKey
 	cuts     []string
+	modes    []bool
 	resizes  [][2]int
 	offers   int
 	arms     int
@@ -141,6 +142,13 @@ func (m *MockHost) Keys() []MockKey {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]MockKey(nil), m.keys...)
+}
+
+// Modes is each SetMode the viewer sent: true to control, false to observe.
+func (m *MockHost) Modes() []bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]bool(nil), m.modes...)
 }
 
 func (m *MockHost) CutTexts() []string {
@@ -349,6 +357,12 @@ func (m *MockHost) serve(conn net.Conn) {
 			if len(msg) >= 8 {
 				m.mu.Lock()
 				m.keys = append(m.keys, MockKey{msg[1] != 0, binary.BigEndian.Uint32(msg[4:8])})
+				m.mu.Unlock()
+			}
+		case MsgClientSetMode:
+			if len(msg) >= 4 {
+				m.mu.Lock()
+				m.modes = append(m.modes, msg[3] == 1)
 				m.mu.Unlock()
 			}
 		case MsgClientCutText:

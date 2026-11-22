@@ -342,6 +342,45 @@ func TestScreenHPAuthAndBusy(t *testing.T) {
 	<-firstDone
 }
 
+// The stream's numbers come every two seconds once it is live; the viewer
+// saying it observes reaches the Mac without ending anything.
+func TestScreenHPStats(t *testing.T) {
+	t.Setenv(screenHPEnvVar, "on")
+	hpLoopbackOnly(t)
+	host := hpMock(t, "pw")
+	v, done := newHPViewer(t, host.Port())
+	v.status(5 * time.Second)
+	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw"})
+	for {
+		m := v.status(30 * time.Second)
+		if m["s"] == "end" {
+			t.Fatalf("ended: %v", m)
+		}
+		if m["s"] == "live" {
+			break
+		}
+	}
+	v.control(map[string]any{"t": "mode", "observe": true})
+	for {
+		m := v.status(6 * time.Second)
+		if m["s"] == "end" {
+			t.Fatalf("ended: %v", m)
+		}
+		if m["s"] == "stats" {
+			if m["fps"].(float64) <= 0 || m["kbps"].(float64) <= 0 {
+				t.Fatalf("stats %v", m)
+			}
+			break
+		}
+	}
+	// Observe reached the Mac's Screen Sharing as its SetMode.
+	if modes := host.Modes(); len(modes) != 1 || modes[0] {
+		t.Fatalf("modes %v", modes)
+	}
+	v.w.Close()
+	<-done
+}
+
 // Nothing comes from a viewer that never says its first word: the session
 // is let go.
 func TestScreenHPNoOpen(t *testing.T) {

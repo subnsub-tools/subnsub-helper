@@ -273,6 +273,18 @@ func (s *Session) SendKey(down bool, keysym uint32) error {
 	return s.sendEvent(&p)
 }
 
+// SetMode tells the host whether the viewer controls the screen or only
+// observes it (RFB SetMode, 0x0a: 1 control, 0 observe), as Screen Sharing's
+// own viewer does; the host shows it. What the viewer sends is its own to
+// hold back.
+func (s *Session) SetMode(control bool) error {
+	m := []byte{MsgClientSetMode, 0, 0, 0}
+	if control {
+		m[3] = 1
+	}
+	return s.Cipher.EncryptAndSend(s.tcp, m)
+}
+
 // SendCutText puts text on the host's clipboard. The message carries
 // Latin-1 only; text with anything else is refused rather than mangled.
 func (s *Session) SendCutText(text string) error {

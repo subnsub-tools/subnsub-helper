@@ -38,6 +38,8 @@ package main
 //	{"op":"accept"}            → waits; {"from":"…","name":"…"} then put's bytes
 //	{"op":"screen"}            → waits; {"from":"page"} then a screen session's
 //	                             two streams, the page's own (screen.go)
+//	{"op":"path","agent":"…"}  → {"ok":true}, then a line a second: how the
+//	                             tailnet and the tunnel reach that Mac (put_path.go)
 //	{"op":"screen-hp"}         → {"ok":true}, then this Mac's own Screen Sharing
 //	                             as out's frames, the helper signing in to it
 //	                             (screenhp.go)
@@ -899,7 +901,7 @@ func servePutLocal(c net.Conn) {
 	// Only the user's own programs reach this socket, and put asks these: it
 	// is on this Mac. A hint rather than proof of the app, as the socket is.
 	switch ask.Op {
-	case "peers", "open", "accept", "screen", "screen-hp", "host", "unhost":
+	case "peers", "open", "accept", "screen", "screen-hp", "path", "host", "unhost":
 		putSeen.Store(true)
 	}
 	switch ask.Op {
@@ -936,6 +938,8 @@ func servePutLocal(c net.Conn) {
 			return
 		}
 		putParkScreen(c)
+	case "path":
+		putPathServe(c, ask.Agent)
 	case "screen-hp":
 		if r.Buffered() > 0 {
 			// Nothing may follow until the answer has come.
