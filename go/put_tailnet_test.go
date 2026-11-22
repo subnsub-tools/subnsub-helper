@@ -30,7 +30,7 @@ func putTnReset(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		putTn.Lock()
-		putTn.addr, putTn.rest = nil, nil
+		putTn.addr, putTn.rest, putTn.reach = nil, nil, nil
 		putTn.Unlock()
 	}
 	reset()
@@ -349,5 +349,75 @@ func TestPutTailnetAfterHandshake(t *testing.T) {
 	}))
 	if _, _, code, err := putConnectTailnet(b, "macA", time.Now().Add(10*time.Second)); err != nil || code != "unreachable" {
 		t.Fatalf("a broken-off answer: %q %v", code, err)
+	}
+}
+
+// A Mac that is not on a tailnet itself calls a peer's door there once the
+// door has been seen to take a connection from it (a router carries it), and
+// not before; a door that takes none is left alone, and a stream does not
+// wait for it to be found out.
+func TestPutTailnetBehindRouter(t *testing.T) {
+	f := newPutFixture(t)
+	putTnReset(t)
+	was := tailnetRoad.Load()
+	tailnetRoad.Store(nil)
+	t.Cleanup(func() { tailnetRoad.Store(was) })
+	b := putTnPair(t, f, key.NodePublic{})
+	start := time.Now()
+	if a := putTnFor("macB"); a != "" {
+		t.Fatalf("the door was called before it was tried: %q", a)
+	}
+	if _, _, _, err := putConnectTailnet(b, "macA", time.Now().Add(10*time.Second)); err != errPutTnSkip {
+		t.Fatalf("a stream before the door was tried: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("finding out held the caller %v", d)
+	}
+	for end := time.Now().Add(5 * time.Second); putTnFor("macB") == "" && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+	}
+	if putTnFor("macB") == "" {
+		t.Fatal("a door that takes connections was not called")
+	}
+	local, app := net.Pipe()
+	putPark(local)
+	defer app.Close()
+	go io.Copy(io.Discard, app)
+	nc, _, code, err := putConnectTailnet(b, "macA", time.Now().Add(10*time.Second))
+	if err != nil || code != "" {
+		t.Fatalf("open: %q %v", code, err)
+	}
+	nc.Close()
+	// The way there as out is told it: the door's own answer, by the router.
+	if p := putPathTailnet(context.Background(), "macB"); p == nil || !p.OK || p.Via != "router" || p.Where == "" {
+		t.Fatalf("path %+v", p)
+	}
+	// One that fails there is not called again until its door is seen to answer.
+	putTnFailed("macB")
+	putTn.Lock()
+	delete(putTn.rest, "macB")
+	putTn.Unlock()
+	if a := putTnFor("macB"); a != "" {
+		t.Fatalf("called again at once after failing: %q", a)
+	}
+	// A door nothing listens at.
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := ln.Addr().String()
+	ln.Close()
+	putTnSet("macStudy01", dead)
+	putTnFor("macStudy01")
+	time.Sleep(500 * time.Millisecond)
+	if a := putTnFor("macStudy01"); a != "" {
+		t.Fatalf("a door that takes no connection was called: %q", a)
+	}
+	if p := putPathTailnet(context.Background(), "macStudy01"); p != nil {
+		t.Fatalf("path to a door not reached: %+v", p)
+	}
+	// With the tailnet off, nothing.
+	t.Setenv("MON_TAILNET", "off")
+	if a := putTnFor("macB"); a != "" {
+		t.Fatalf("called with the tailnet off: %q", a)
 	}
 }

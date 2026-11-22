@@ -12,6 +12,10 @@ package main
 //	{"at": ms, "tailnet": {ok, ms, via, where, node, why}}
 //	{"at": ms, "tailcat": {ok, ms, via, where, node, why}}
 //
+// From a Mac that is not on a tailnet itself and reaches the other Mac's door
+// through a router that is (put_tailnet.go), tailnet is the time a TCP
+// connection to that door takes, via "router", where the door's address.
+//
 // tailnet is this Mac's Tailscale pinging the other Mac's tailnet address as
 // `tailscale ping --until-direct=false` does (tsping.go: via is direct,
 // peer-relay or derp, where the endpoint, the relay or the region), where both
@@ -100,12 +104,27 @@ func putPathServe(c net.Conn, agent string) {
 // putPathTailnet: this Mac's Tailscale pinging the peer's tailnet address, or
 // nil where there is none to ping.
 func putPathTailnet(ctx context.Context, agent string) *tsPingBody {
-	if putTnSelf() == "" {
+	if tailnetOff() {
 		return nil
 	}
 	putTn.Lock()
 	a := putTn.addr[agent]
 	putTn.Unlock()
+	if putTnSelf() == "" {
+		// No Tailscale here to ping with: the door itself, while this Mac
+		// gets to it.
+		if a == "" || !putTnReachable(agent) {
+			return nil
+		}
+		out := &tsPingBody{V: 1, At: time.Now().Unix()}
+		took, err := putTnKnock(ctx, a)
+		if err != nil {
+			out.Why = "timeout"
+			return out
+		}
+		out.OK, out.MS, out.Via, out.Where = true, float64(took.Microseconds()/100)/10, "router", a
+		return out
+	}
 	ap, err := netip.ParseAddrPort(a)
 	if err != nil {
 		return nil

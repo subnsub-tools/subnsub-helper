@@ -24,6 +24,17 @@ package main
 // the session there would not prove the peer's key. So the first stream
 // after a helper starts goes by tailcat, and the next ones try the tailnet.
 //
+// A MAC BEHIND A ROUTER ON THE TAILNET. A Mac with no Tailscale of its own can
+// still be where a tailnet address is reached: its router is on the tailnet
+// and carries the LAN there (user 2026-11-22: why tailcat and not the tailnet —
+// this Mac goes to m2 through the router, and the router goes there directly).
+// Such a Mac has no door of its own, so the others never call it by the
+// tailnet, but it calls theirs: the door asks nothing of where a caller comes
+// from, only its key. So that a Mac with no such router does not lose
+// putTnWait on every stream, the peer's door is tried apart from any stream
+// (putTnProbe: a TCP connection to it, when the address is learned and every
+// putTnReachEvery after), and streams go there only while it last answered.
+//
 // FALLING BACK. The tailnet gets putTnWait to have the stream's answer begun;
 // then the stream goes by tailcat in the time left, as it always did. A peer
 // whose tailnet did not answer is not tried there again for putTnRest.
@@ -67,6 +78,10 @@ const (
 	putTnHandshakes = 8
 	// The door's handshake and the stream's request, at most this long.
 	putTnHandshakeWait = 5 * time.Second
+	// From a Mac that is not on a tailnet itself: how long a peer's door has
+	// to take a connection, and how long what it did is believed.
+	putTnProbeWait  = 3 * time.Second
+	putTnReachEvery = 5 * time.Minute
 )
 
 // putTnWait is the tailnet's time to answer before tailcat is tried; a test
@@ -77,6 +92,9 @@ var putTn struct {
 	sync.Mutex
 	addr map[string]string    // agent id → its tailnet road, as it said it
 	rest map[string]time.Time // agent id → not tried on the tailnet before this
+	// agent id → whether its door took a connection from this Mac, which is
+	// not on a tailnet itself, and when that was last tried.
+	reach map[string]putTnReach
 }
 
 var putTnBusy atomic.Int32
@@ -107,6 +125,13 @@ func putTnValid(v string) string {
 	return ap.String()
 }
 
+type putTnReach struct {
+	addr   string
+	ok     bool
+	at     time.Time
+	trying bool
+}
+
 // putTnLearn keeps what a peer said of its tailnet road; a word that is not
 // an address keeps what was known.
 func putTnLearn(agent, v string) {
@@ -115,7 +140,6 @@ func putTnLearn(agent, v string) {
 		return
 	}
 	putTn.Lock()
-	defer putTn.Unlock()
 	if putTn.addr == nil {
 		putTn.addr = map[string]string{}
 	}
@@ -124,12 +148,21 @@ func putTnLearn(agent, v string) {
 		delete(putTn.rest, agent)
 	}
 	putTn.addr[agent] = a
+	putTn.Unlock()
+	if putTnSelf() == "" {
+		// Whether this Mac gets there at all is found out before a stream asks.
+		putTnReachable(agent)
+	}
 }
 
-// putTnFor is where the peer listens on the tailnet, when this Mac is on one,
-// knows where, and the peer has not just failed there.
+// putTnFor is where the peer listens on the tailnet, when this Mac knows
+// where, the peer has not just failed there, and this Mac is on a tailnet or
+// was last seen to get to that door without being on one.
 func putTnFor(agent string) string {
-	if putTnSelf() == "" {
+	if tailnetOff() {
+		return ""
+	}
+	if putTnSelf() == "" && !putTnReachable(agent) {
 		return ""
 	}
 	putTn.Lock()
@@ -140,6 +173,58 @@ func putTnFor(agent string) string {
 	return putTn.addr[agent]
 }
 
+// putTnReachable says whether the peer's door last took a connection from
+// this Mac, and has it tried again, apart from the caller, when that is not
+// known of the address the peer now has or was found out putTnReachEvery ago.
+func putTnReachable(agent string) bool {
+	putTn.Lock()
+	defer putTn.Unlock()
+	addr := putTn.addr[agent]
+	if addr == "" {
+		return false
+	}
+	r := putTn.reach[agent]
+	if r.addr != addr {
+		r = putTnReach{addr: addr}
+	}
+	if !r.trying && time.Since(r.at) >= putTnReachEvery {
+		r.trying = true
+		go putTnProbe(agent, addr)
+	}
+	if putTn.reach == nil {
+		putTn.reach = map[string]putTnReach{}
+	}
+	putTn.reach[agent] = r
+	return r.ok
+}
+
+// putTnProbe tries the peer's door once and keeps what it did.
+func putTnProbe(agent, addr string) {
+	_, err := putTnKnock(context.Background(), addr)
+	putTn.Lock()
+	defer putTn.Unlock()
+	if putTn.reach == nil || putTn.reach[agent].addr != addr {
+		return
+	}
+	putTn.reach[agent] = putTnReach{addr: addr, ok: err == nil, at: time.Now()}
+}
+
+// putTnKnock is a TCP connection to a door, made and let go: how long it
+// took, which is the way there and back once.
+func putTnKnock(ctx context.Context, addr string) (time.Duration, error) {
+	ctx, cancel := context.WithTimeout(ctx, putTnProbeWait)
+	defer cancel()
+	start := time.Now()
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "tcp4", addr)
+	if err != nil {
+		return 0, err
+	}
+	took := time.Since(start)
+	c.Close()
+	return took, nil
+}
+
 func putTnFailed(agent string) {
 	putTn.Lock()
 	defer putTn.Unlock()
@@ -147,6 +232,12 @@ func putTnFailed(agent string) {
 		putTn.rest = map[string]time.Time{}
 	}
 	putTn.rest[agent] = time.Now().Add(putTnRest)
+	// Not on a tailnet itself, this Mac does not go back there until the door
+	// is seen to take a connection again.
+	if r, ok := putTn.reach[agent]; ok {
+		r.ok, r.at = false, time.Now()
+		putTn.reach[agent] = r
+	}
 }
 
 // putMachineKeys are the put keys as the Noise session takes them: the same
