@@ -490,6 +490,9 @@ func (t *tailnetServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case putTnPath:
+		// out's streams from another of the owner's Macs (put_tailnet.go).
+		putTailnetServe(w, r)
 	case "/tn/open":
 		t.open(w, r)
 	case "/tn/rpc":

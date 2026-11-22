@@ -396,9 +396,12 @@ func dialPut(t *testing.T, ask string) (net.Conn, *bufio.Reader, map[string]any)
 // stops, a healthy one answers the upgrade as the peer's helper does.
 type fakeTunnel struct {
 	stale, partial bool
-	mu             sync.Mutex
-	dials, closes  int
-	conns          []net.Conn
+	// tn: a tailnet road its answer names; asked: the head of the last ask.
+	tn            string
+	asked         string
+	mu            sync.Mutex
+	dials, closes int
+	conns         []net.Conn
 }
 
 func (f *fakeTunnel) DialTCPPort(ctx context.Context, port uint16) (net.Conn, error) {
@@ -416,6 +419,7 @@ func (f *fakeTunnel) DialTCPPort(ctx context.Context, port uint16) (net.Conn, er
 	go func() {
 		defer theirs.Close()
 		r := bufio.NewReader(theirs)
+		var head strings.Builder
 		for {
 			line, err := r.ReadString('\n')
 			if err != nil {
@@ -424,12 +428,20 @@ func (f *fakeTunnel) DialTCPPort(ctx context.Context, port uint16) (net.Conn, er
 			if line == "\r\n" {
 				break
 			}
+			head.WriteString(line)
 		}
+		f.mu.Lock()
+		f.asked = head.String()
+		f.mu.Unlock()
 		if f.partial {
 			io.WriteString(theirs, "HTTP/1.1 403 Forbidden\r\n")
 			return
 		}
-		io.WriteString(theirs, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: put\r\nConnection: Upgrade\r\n\r\n")
+		answer := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: put\r\nConnection: Upgrade\r\n"
+		if f.tn != "" {
+			answer += putTnHeader + ": " + f.tn + "\r\n"
+		}
+		io.WriteString(theirs, answer+"\r\n")
 		io.Copy(io.Discard, theirs)
 	}()
 	return mine, nil

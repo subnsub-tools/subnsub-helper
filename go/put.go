@@ -33,7 +33,7 @@ package main
 // stream:
 //
 //	{"op":"peers"}             → {"self":{…},"peers":[{"agent","name"}],"tunnel":bool,"version":…}
-//	{"op":"open","agent":"…"}  → {"ok":true,"route":"direct|derp|"} then put's bytes,
+//	{"op":"open","agent":"…"}  → {"ok":true,"route":"tailnet|direct|derp|"} then put's bytes,
 //	                             or {"ok":false,"error":"<code>"}
 //	{"op":"accept"}            → waits; {"from":"…","name":"…"} then put's bytes
 //	{"op":"screen"}            → waits; {"from":"page"} then a screen session's
@@ -48,9 +48,11 @@ package main
 //
 // NOT A RELAY: a stream goes from put on one of the owner's Macs to put on
 // another, and nowhere else — no other port, no other process, no other
-// machine. Where no direct path forms, the encrypted bytes cross a public
-// DERP relay like every tunnel's; put keeps large Shelf contents to direct
-// paths.
+// machine. Where both Macs are on one tailnet, it goes there first
+// (put_tailnet.go: the tailnet road's /tn/put door, a Noise session proving the
+// same keys); else, and when that does not answer, through the tunnel. Where
+// no direct path forms there, the encrypted bytes cross a public DERP relay
+// like every tunnel's; put keeps large Shelf contents to direct paths.
 
 import (
 	"bufio"
@@ -645,7 +647,13 @@ func (h *directHandler) putServe(w http.ResponseWriter, r *http.Request, p putPe
 		return
 	}
 	conn.SetDeadline(time.Time{})
-	if _, err := io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: put\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+	// Each side names its tailnet road (put_tailnet.go); the tunnel vouches for who said it.
+	putTnLearn(p.Agent, r.Header.Get(putTnHeader))
+	answer := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: put\r\nConnection: Upgrade\r\n"
+	if self := putTnSelf(); self != "" {
+		answer += putTnHeader + ": " + self + "\r\n"
+	}
+	if _, err := io.WriteString(conn, answer+"\r\n"); err != nil {
 		putStreamEnd()
 		conn.Close()
 		local.Close()
@@ -964,6 +972,19 @@ func putOpen(c net.Conn, r *bufio.Reader, agent string) {
 	defer putStreamEnd()
 	// One deadline for the whole open, retry included.
 	deadline := time.Now().Add(putDialWait)
+	// The tailnet first, where both Macs are on one and this one knows where
+	// the other listens there (put_tailnet.go); tailcat when it does not answer.
+	if p.node.IsZero() {
+		// An entry without a key could not prove the peer on the tailnet.
+	} else if nc, nr, code, err := putConnectTailnet(p, agentID(), deadline); code != "" {
+		fail(code)
+		return
+	} else if err == nil {
+		putCarry(c, r, nc, nr, p, "tailnet")
+		return
+	} else if !errors.Is(err, errPutTnSkip) {
+		putTnFailed(p.Agent)
+	}
 	pc, reused, err := putClientFor(p)
 	if err != nil {
 		fail("unavailable")
@@ -1012,10 +1033,16 @@ func putOpen(c net.Conn, r *bufio.Reader, agent string) {
 		fail(code)
 		return
 	}
+	putCarry(c, r, nc, nr, p, pc.route())
+}
+
+// putCarry answers put's open and carries the stream, by whichever road it
+// was opened.
+func putCarry(c net.Conn, r *bufio.Reader, nc net.Conn, nr *bufio.Reader, p putPeer, route string) {
 	nc.SetDeadline(time.Time{})
 	untrack := putTrack(p.Agent, c, nc)
 	defer untrack()
-	if putAnswer(c, map[string]any{"ok": true, "route": pc.route()}) != nil {
+	if putAnswer(c, map[string]any{"ok": true, "route": route}) != nil {
 		nc.Close()
 		c.Close()
 		return
@@ -1039,7 +1066,11 @@ func putConnect(pc *putClient, deadline time.Time) (net.Conn, *bufio.Reader, str
 		return nil, nil, "", fmt.Errorf("%w: %v", errPutSilent, err)
 	}
 	nc.SetDeadline(deadline)
-	if _, err := io.WriteString(nc, "GET "+putStreamPath+" HTTP/1.1\r\nHost: tailcat\r\nUpgrade: put\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+	ask := "GET " + putStreamPath + " HTTP/1.1\r\nHost: tailcat\r\nUpgrade: put\r\nConnection: Upgrade\r\n"
+	if self := putTnSelf(); self != "" {
+		ask += putTnHeader + ": " + self + "\r\n"
+	}
+	if _, err := io.WriteString(nc, ask+"\r\n"); err != nil {
 		nc.Close()
 		return nil, nil, "", fmt.Errorf("%w: %v", errPutSilent, err)
 	}
@@ -1050,11 +1081,12 @@ func putConnect(pc *putClient, deadline time.Time) (net.Conn, *bufio.Reader, str
 	}
 	// An answer has begun: whatever happens now, the tunnel works, and the
 	// other side may have handed the stream on already, so it is not retried.
-	status, upgraded, code, err := putReadHead(nr)
+	status, upgraded, code, tn, err := putReadHeadAs(nr, "put")
 	if err != nil {
 		nc.Close()
 		return nil, nil, "", err
 	}
+	putTnLearn(pc.agent, tn)
 	if status != http.StatusSwitchingProtocols || !upgraded {
 		nc.Close()
 		if code == "" {
@@ -1069,6 +1101,13 @@ func putConnect(pc *putClient, deadline time.Time) (net.Conn, *bufio.Reader, str
 // putHeadMax bytes of it, and nothing past it — for the status, whether it
 // upgraded to put, and for a refusal its error frame's code.
 func putReadHead(r *bufio.Reader) (status int, upgraded bool, code string, err error) {
+	status, upgraded, code, _, err = putReadHeadAs(r, "put")
+	return
+}
+
+// putReadHeadAs is putReadHead for an upgrade to want, with what the answer
+// said of the other side's tailnet road (put_tailnet.go).
+func putReadHeadAs(r *bufio.Reader, want string) (status int, upgraded bool, code, tn string, err error) {
 	total := 0
 	line := func() (string, error) {
 		var b []byte
@@ -1089,20 +1128,20 @@ func putReadHead(r *bufio.Reader) (status int, upgraded bool, code string, err e
 	}
 	first, err := line()
 	if err != nil {
-		return 0, false, "", err
+		return 0, false, "", "", err
 	}
 	parts := strings.SplitN(first, " ", 3)
 	if len(parts) < 2 || !strings.HasPrefix(parts[0], "HTTP/1.") {
-		return 0, false, "", errors.New("not an HTTP answer")
+		return 0, false, "", "", errors.New("not an HTTP answer")
 	}
 	if _, err := fmt.Sscanf(parts[1], "%d", &status); err != nil {
-		return 0, false, "", err
+		return 0, false, "", "", err
 	}
 	header := http.Header{}
 	for {
 		l, err := line()
 		if err != nil {
-			return 0, false, "", err
+			return 0, false, "", "", err
 		}
 		if l == "" {
 			break
@@ -1113,7 +1152,7 @@ func putReadHead(r *bufio.Reader) (status int, upgraded bool, code string, err e
 	}
 	if status == http.StatusSwitchingProtocols {
 		conn := strings.ToLower(header.Get("Connection"))
-		return status, strings.EqualFold(header.Get("Upgrade"), "put") && strings.Contains(conn, "upgrade"), "", nil
+		return status, strings.EqualFold(header.Get("Upgrade"), want) && strings.Contains(conn, "upgrade"), "", header.Get(putTnHeader), nil
 	}
 	var n int
 	if _, err := fmt.Sscanf(header.Get("Content-Length"), "%d", &n); err == nil && n > 0 && n <= 4<<10 {
@@ -1127,7 +1166,7 @@ func putReadHead(r *bufio.Reader) (status int, upgraded bool, code string, err e
 			}
 		}
 	}
-	return status, false, code, nil
+	return status, false, code, "", nil
 }
 
 // ── the clients this Mac dials its peers with ────────────────────────────
