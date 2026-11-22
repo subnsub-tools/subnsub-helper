@@ -177,7 +177,9 @@ type Session struct {
 	closeOnce  sync.Once
 	// The session's Run, while there is one (stream.go).
 	runMu sync.Mutex
-	run   *runState
+	// Held while a display is asked for (Resize, askedDisplay).
+	displayMu sync.Mutex
+	run       *runState
 }
 
 // LocalTCPAddr returns the established TCP client address.

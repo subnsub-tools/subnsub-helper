@@ -420,4 +420,12 @@ func TestPutTailnetBehindRouter(t *testing.T) {
 	if a := putTnFor("macB"); a != "" {
 		t.Fatalf("called with the tailnet off: %q", a)
 	}
+	// Nor is a door a peer then names tried.
+	putTnLearn("macLate", "100.100.1.2:8126")
+	putTn.Lock()
+	r := putTn.reach["macLate"]
+	putTn.Unlock()
+	if r.trying || !r.at.IsZero() {
+		t.Fatalf("a door was tried with the tailnet off: %+v", r)
+	}
 }

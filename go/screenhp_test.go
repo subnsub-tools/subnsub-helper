@@ -277,8 +277,7 @@ func TestScreenHPSession(t *testing.T) {
 	offers, _, _ := host.Counts()
 	v.control(map[string]any{"t": "kbps", "kbps": 3000})
 	waitHP(t, "the second offer", func() bool { n, _, _ := host.Counts(); return n > offers })
-	// Clipboard text Screen Sharing takes, and text it does not: the viewer
-	// hears of the second.
+	// Clipboard text Latin-1 holds, as cut text.
 	v.control(map[string]any{"t": "clip", "text": "plain caf\u00e9"})
 	waitHP(t, "the clipboard", func() bool { c := host.CutTexts(); return len(c) > 0 && c[len(c)-1] == "plain caf\u00e9" })
 
@@ -401,8 +400,9 @@ func TestScreenHPNoOpen(t *testing.T) {
 	}
 }
 
-// Text with what Latin-1 has not is refused, and the viewer told.
-func TestScreenHPClipboardRefused(t *testing.T) {
+// Text with what Latin-1 has not reaches the Mac's clipboard whole; text too
+// long for one message does not go, and the viewer is told.
+func TestScreenHPClipboardAnyText(t *testing.T) {
 	t.Setenv(screenHPEnvVar, "on")
 	hpLoopbackOnly(t)
 	host := hpMock(t, "pw")
@@ -418,7 +418,20 @@ func TestScreenHPClipboardRefused(t *testing.T) {
 			t.Fatalf("ended: %v", m)
 		}
 	}
-	v.control(map[string]any{"t": "clip", "text": "\u4f60\u597d"})
+	v.control(map[string]any{"t": "clip", "text": "\u4f60\u597d\uff0c\u4e16\u754c \U0001f600"})
+	waitHP(t, "the clipboard", func() bool {
+		c := host.Clipboards()
+		return len(c) == 1 && c[0] == "\u4f60\u597d\uff0c\u4e16\u754c \U0001f600"
+	})
+	// 80,000 characters that do not repeat: under the helper's limit, and
+	// more than one message holds however it is packed.
+	long := make([]rune, 80000)
+	x := uint32(1)
+	for i := range long {
+		x = x*1664525 + 1013904223
+		long[i] = rune(0x4e00 + (x>>8)%20000)
+	}
+	v.control(map[string]any{"t": "clip", "text": string(long)})
 	for {
 		m := v.status(10 * time.Second)
 		if m["s"] == "clip" {
@@ -427,6 +440,45 @@ func TestScreenHPClipboardRefused(t *testing.T) {
 			}
 			break
 		}
+	}
+	if c := host.Clipboards(); len(c) != 1 {
+		t.Fatalf("clipboards %d, want the first alone", len(c))
+	}
+	v.w.Close()
+	<-done
+}
+
+// A size asked for while the session is still signing in is the size the
+// display ends at: the viewer does not ask for it again.
+func TestScreenHPSizeWhileSigningIn(t *testing.T) {
+	t.Setenv(screenHPEnvVar, "on")
+	hpLoopbackOnly(t)
+	host := hpMock(t, "pw")
+	v, done := newHPViewer(t, host.Port())
+	v.status(5 * time.Second)
+	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw", "own": true, "w": 1000, "h": 600, "scale": 1})
+	v.control(map[string]any{"t": "size", "w": 1200, "h": 700, "scale": 2})
+	want, got := [4]int{1200, 700, 2400, 1400}, [4]int{}
+	deadline := time.After(45 * time.Second)
+	for got != want {
+		select {
+		case f, ok := <-v.frames:
+			if !ok {
+				t.Fatalf("the session ended; layout %v", got)
+			}
+			if f.kind == swToLayout && len(f.body) == 8 {
+				got = [4]int{int(binary.BigEndian.Uint16(f.body[0:2])), int(binary.BigEndian.Uint16(f.body[2:4])),
+					int(binary.BigEndian.Uint16(f.body[4:6])), int(binary.BigEndian.Uint16(f.body[6:8]))}
+			}
+			if f.kind == swToStatus && bytes.Contains(f.body, []byte(`"end"`)) {
+				t.Fatalf("ended: %s", f.body)
+			}
+		case <-deadline:
+			t.Fatalf("layout %v, want %v", got, want)
+		}
+	}
+	if r := host.Resizes(); len(r) == 0 || r[len(r)-1] != [2]int{1200, 700} {
+		t.Fatalf("asked for %v", r)
 	}
 	v.w.Close()
 	<-done

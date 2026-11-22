@@ -183,11 +183,30 @@ func TestRunAgainstMockHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := sess.SendCutText("\u4f60\u597d"); err == nil {
-		t.Fatal("text outside Latin-1 was sent")
+		t.Fatal("text outside Latin-1 was sent as cut text")
+	}
+	// Text Latin-1 holds goes as cut text; any other as a whole clipboard,
+	// which the host reads as the Mac does.
+	if err := sess.SendClipboard("na\u00efve"); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"\u4f60\u597d\uff0c\u4e16\u754c", "caf\u00e9 \U0001f600\n\u65e5\u672c\u8a9e"} {
+		if err := sess.SendClipboard(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sess.SendClipboard("\u4f60\xff"); err == nil {
+		t.Fatal("text that is not UTF-8 was sent")
 	}
 	waitFor(t, "the viewer's input", func() bool {
-		return len(host.Pointers()) == 1 && len(host.Keys()) == 2 && len(host.CutTexts()) == 1
+		return len(host.Pointers()) == 1 && len(host.Keys()) == 2 && len(host.CutTexts()) == 2 && len(host.Clipboards()) == 2
 	})
+	if c := host.CutTexts()[1]; c != "na\u00efve" {
+		t.Fatalf("cut text %q", c)
+	}
+	if c := host.Clipboards(); c[0] != "\u4f60\u597d\uff0c\u4e16\u754c" || c[1] != "caf\u00e9 \U0001f600\n\u65e5\u672c\u8a9e" {
+		t.Fatalf("clipboards %q", c)
+	}
 	if p := host.Pointers()[0]; p != (MockPointer{1, 640, 360}) {
 		t.Fatalf("pointer %+v", p)
 	}

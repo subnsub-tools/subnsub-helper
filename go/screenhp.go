@@ -45,9 +45,9 @@ package main
 //	from the viewer 1 control (JSON): open {codecs, audio, kbps, user,
 //	                  password, own, w, h, scale}, size {w h scale}, kbps,
 //	                  mode {observe} (told to the Mac, as its own viewer does),
-//	                  key, clip {text} (Latin-1 only: Screen Sharing takes no
-//	                  other from a client; status clip {ok: false} when it
-//	                  did not go), text {text}
+//	                  key, clip {text} (any text; status clip {ok: false}
+//	                  when it did not go: too long for one message), text
+//	                  {text}
 //	                2 pointer: buttons u8 (1 left, 2 middle, 4 right),
 //	                  x y u16 (points); Screen Sharing has middle and right
 //	                  the other way round, and this turns them
@@ -175,6 +175,14 @@ type hpScreen struct {
 	buttons        byte
 	px, py         int
 	wheelX, wheelY int
+	// The size the viewer last asked its own display to be: one asked for
+	// while the session is still signing in is the one it is made at.
+	want *hpSize
+}
+
+type hpSize struct {
+	w, h  int
+	scale float64
 }
 
 func newHPScreen() *hpScreen {
@@ -201,14 +209,22 @@ func (p *hpScreen) status(v map[string]any) {
 }
 
 // pushWaiting is for a frame worth waiting for, which the viewer acts on: a
-// status, or the display's size, which the pointer goes by (a layout lost
-// while the viewer is behind would leave it mapping the pointer by the old
-// size until the next).
+// status.
 func (p *hpScreen) pushWaiting(kind byte, body []byte) {
 	select {
 	case p.out <- hpFrame{kind, body}:
 	case <-p.ctx.Done():
 	case <-time.After(5 * time.Second):
+	}
+}
+
+// pushLayout queues the display's size and waits for room however long: the
+// viewer maps the pointer by it, so it goes or the session ends (a viewer
+// that takes nothing for hpWriteWait is let go, which ends the wait).
+func (p *hpScreen) pushLayout(body []byte) {
+	select {
+	case p.out <- hpFrame{swToLayout, body}:
+	case <-p.ctx.Done():
 	}
 }
 
@@ -346,7 +362,7 @@ func (p *hpScreen) handler() applehp.Handler {
 			binary.BigEndian.PutUint16(b[2:4], uint16(sh))
 			binary.BigEndian.PutUint16(b[4:6], uint16(bw))
 			binary.BigEndian.PutUint16(b[6:8], uint16(bh))
-			p.pushWaiting(swToLayout, b)
+			p.pushLayout(b)
 		},
 		Clipboard: func(text string) {
 			if len(text) > hpClipboardMax {
@@ -519,6 +535,13 @@ func (p *hpScreen) run(o hpCommand, port int) {
 			}
 		}
 		cfg := base
+		if o.Own {
+			p.mu.Lock()
+			if w := p.want; w != nil {
+				cfg.Width, cfg.Height, cfg.HiDPIScale = w.w, w.h, w.scale
+			}
+			p.mu.Unlock()
+		}
 		cfg.Host = rt.host
 		cfg.LocalTCPAddr = rt.local
 		cfg.UDPBindAddr = rt.udpBind
@@ -553,8 +576,14 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		p.mu.Lock()
 		p.sess = sess
 		p.hold, p.ahead = false, 0
+		// A size asked for while this route was signing in: from here the
+		// viewer's sizes go to the session themselves.
+		late := p.want
 		p.mu.Unlock()
 		go func() { done <- sess.Run(rctx, p.handler()) }()
+		if o.Own && late != nil && (late.w != cfg.Width || late.h != cfg.Height || late.scale != cfg.HiDPIScale) {
+			_ = sess.Resize(late.w, late.h, late.scale)
+		}
 		// Signed in and answered is not yet a picture: the media has to find
 		// its way to this process.
 		live := false
@@ -742,12 +771,20 @@ func (p *hpScreen) take(f hpFrame, port int) bool {
 			p.mu.Unlock()
 			// Only a display of the session's own takes another size; the
 			// Mac's own is shown as it is.
-			if sess != nil && own && o.W >= 320 && o.H >= 200 && o.W <= 7680 && o.H <= 4320 {
+			if o.W >= 320 && o.H >= 200 && o.W <= 7680 && o.H <= 4320 {
 				sc := o.Scale
 				if sc < 1 || sc > 3 {
 					sc = 1
 				}
-				_ = sess.Resize(o.W, o.H, sc)
+				// Kept as well as asked for: the session may still be signing
+				// in, or be made again on another route.
+				p.mu.Lock()
+				p.want = &hpSize{o.W, o.H, sc}
+				sess = p.sess
+				p.mu.Unlock()
+				if sess != nil && own {
+					_ = sess.Resize(o.W, o.H, sc)
+				}
 			}
 		case "key":
 			if sess != nil {
@@ -767,10 +804,10 @@ func (p *hpScreen) take(f hpFrame, port int) bool {
 			}
 		case "clip":
 			if sess != nil && len(o.Text) <= hpClipboardMax {
-				// Screen Sharing takes a client's clipboard as Latin-1 text
-				// only (RFB's ClientCutText): the viewer is told when text did
-				// not go, rather than the Mac keeping its old clipboard quietly.
-				if err := sess.SendCutText(o.Text); err != nil {
+				// Any text goes (applehp's SendClipboard) unless it is too long
+				// for one message: the viewer is told when text did not go,
+				// rather than the Mac keeping its old clipboard quietly.
+				if err := sess.SendClipboard(o.Text); err != nil {
 					p.status(map[string]any{"s": "clip", "ok": false})
 				}
 			}

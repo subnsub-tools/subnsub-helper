@@ -149,9 +149,11 @@ func putTnLearn(agent, v string) {
 	}
 	putTn.addr[agent] = a
 	putTn.Unlock()
-	if putTnSelf() == "" {
+	if !tailnetOff() && putTnSelf() == "" {
 		// Whether this Mac gets there at all is found out before a stream asks.
-		putTnReachable(agent)
+		putTn.Lock()
+		putTnReachableLocked(agent)
+		putTn.Unlock()
 	}
 }
 
@@ -162,23 +164,34 @@ func putTnFor(agent string) string {
 	if tailnetOff() {
 		return ""
 	}
-	if putTnSelf() == "" && !putTnReachable(agent) {
-		return ""
-	}
+	self := putTnSelf()
 	putTn.Lock()
 	defer putTn.Unlock()
+	// The door found open and the door dialed are the same one: both are
+	// read under one lock, so an address learned in between is not dialed
+	// before it has been tried.
+	if self == "" && !putTnReachableLocked(agent) {
+		return ""
+	}
 	if time.Now().Before(putTn.rest[agent]) {
 		return ""
 	}
 	return putTn.addr[agent]
 }
 
-// putTnReachable says whether the peer's door last took a connection from
-// this Mac, and has it tried again, apart from the caller, when that is not
-// known of the address the peer now has or was found out putTnReachEvery ago.
+// putTnReachable is putTnReachableLocked for a caller that does not hold
+// putTn.
 func putTnReachable(agent string) bool {
 	putTn.Lock()
 	defer putTn.Unlock()
+	return putTnReachableLocked(agent)
+}
+
+// putTnReachableLocked says whether the peer's door last took a connection
+// from this Mac, and has it tried again, apart from the caller, when that is
+// not known of the address the peer now has or was found out putTnReachEvery
+// ago. The caller holds putTn.
+func putTnReachableLocked(agent string) bool {
 	addr := putTn.addr[agent]
 	if addr == "" {
 		return false

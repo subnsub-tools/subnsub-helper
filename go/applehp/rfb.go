@@ -19,6 +19,7 @@ const (
 	MsgClientAutoPasteboard     byte = 0x15
 	MsgClientMediaNegotiation   byte = 0x1c
 	MsgClientVirtualDisplay     byte = 0x1d
+	MsgClientClipboardSend      byte = 0x1f
 	MsgClientViewerInfo         byte = 0x21
 
 	MsgServerFramebufferUpdate byte = 0x00

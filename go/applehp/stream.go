@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -100,8 +101,11 @@ type runState struct {
 	askW, askH int
 	askLeft    []int
 	askTimer   *time.Timer
-	cursorZ    *chunkInflater
-	clipZ      *chunkInflater
+	// Counts the sizes asked for: an answer is read for the size it was an
+	// answer to, and not once another has been asked for.
+	askGen  int
+	cursorZ *chunkInflater
+	clipZ   *chunkInflater
 }
 
 // Stats returns the counters of the session's current or last Run.
@@ -127,7 +131,7 @@ func (s *Session) Run(ctx context.Context, h Handler) error {
 		return errors.New("applehp: session already running")
 	}
 	s.run = rs
-	if s.cfg.Curtain {
+	if s.ownDisplay() {
 		rs.askW, rs.askH, rs.askLeft = s.cfg.Width, s.cfg.Height, formsAfter(s.cfg.form, s.cfg.HiDPIScale)
 	}
 	s.runMu.Unlock()
@@ -274,7 +278,7 @@ func (s *Session) sendEvent(block *[16]byte) error {
 // CGEventGetLocation). The Mac's own display at more than a pixel a point has
 // not been measured, and is sent the points as before.
 func (s *Session) SendPointer(mask byte, x, y int) error {
-	if sw, sh, bw, bh := s.Layout(); s.cfg.Curtain && sw > 0 && sh > 0 && bw > sw && bh > sh {
+	if sw, sh, bw, bh := s.Layout(); s.ownDisplay() && sw > 0 && sh > 0 && bw > sw && bh > sh {
 		// The middle of the point.
 		x, y = (2*x+1)*bw/(2*sw), (2*y+1)*bh/(2*sh)
 	}
@@ -311,8 +315,74 @@ func (s *Session) SetMode(control bool) error {
 	return s.Cipher.EncryptAndSend(s.tcp, m)
 }
 
-// SendCutText puts text on the host's clipboard. The message carries
-// Latin-1 only; text with anything else is refused rather than mangled.
+// SendClipboard puts text on the host's clipboard. Text Latin-1 holds goes
+// as RFB's ClientCutText, as it always has. Any other goes as Screen
+// Sharing's own viewer sends a clipboard: message 0x1f, the mirror of the
+// one the host sends (screensharingd's HandleViewerClipboardSend, which
+// hands the bytes to the agent's SetPasteboard), with the text as one
+// public.utf8-plain-text flavor.
+func (s *Session) SendClipboard(text string) error {
+	if latin1(text) {
+		return s.SendCutText(text)
+	}
+	if !utf8.ValidString(text) {
+		return errors.New("applehp: clipboard text is not UTF-8")
+	}
+	if len(text) > clipboardMax {
+		return errors.New("applehp: clipboard text too long")
+	}
+	arc := pasteboardArchive(text)
+	var zb bytes.Buffer
+	zw := zlib.NewWriter(&zb)
+	// The agent inflates each clipboard as a stream of its own, and takes
+	// one that ends where the message does and gives the size declared.
+	if _, err := zw.Write(arc); err != nil {
+		return err
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	// A record's body is at most 65535 bytes, and a message is one record.
+	if zb.Len() > 60000 {
+		return errors.New("applehp: clipboard text too long for one record")
+	}
+	m := make([]byte, 16, 16+zb.Len())
+	m[0] = MsgClientClipboardSend
+	binary.BigEndian.PutUint32(m[8:12], uint32(len(arc)))
+	binary.BigEndian.PutUint32(m[12:16], uint32(zb.Len()))
+	m = append(m, zb.Bytes()...)
+	return s.Cipher.EncryptAndSend(s.tcp, m)
+}
+
+func latin1(text string) bool {
+	for _, r := range text {
+		if r > 0xff {
+			return false
+		}
+	}
+	return true
+}
+
+// pasteboardArchive is text as a clipboard of one flavor, in the form the
+// host's own archive has (pasteboardText reads it): the number of flavors,
+// then for each its type, a word of flags, its tags (none) and its data,
+// every string and the data led by their length.
+func pasteboardArchive(text string) []byte {
+	const uti = "public.utf8-plain-text"
+	arc := make([]byte, 0, 4+4+len(uti)+4+4+4+len(text))
+	arc = binary.BigEndian.AppendUint32(arc, 1)
+	arc = binary.BigEndian.AppendUint32(arc, uint32(len(uti)))
+	arc = append(arc, uti...)
+	arc = binary.BigEndian.AppendUint32(arc, 0)
+	arc = binary.BigEndian.AppendUint32(arc, 0)
+	arc = binary.BigEndian.AppendUint32(arc, uint32(len(text)))
+	arc = append(arc, text...)
+	return arc
+}
+
+// SendCutText puts text on the host's clipboard as RFB's ClientCutText. The
+// message carries Latin-1 only; text with anything else is refused rather
+// than mangled (SendClipboard sends it another way).
 func (s *Session) SendCutText(text string) error {
 	b := make([]byte, 0, len(text))
 	for _, r := range text {
@@ -340,12 +410,16 @@ func (s *Session) SendCutText(text string) error {
 // comes back through Handler.Layout, and the picture follows it. A session
 // that shares the Mac's own display (no virtual display) cannot be resized.
 func (s *Session) Resize(w, h int, hidpi float64) error {
-	if !s.cfg.Curtain {
+	if !s.ownDisplay() {
 		return errors.New("applehp: this session shares the physical display")
 	}
 	if w < 320 || h < 200 || w > 7680 || h > 4320 {
 		return fmt.Errorf("applehp: display size %dx%d out of range", w, h)
 	}
+	// One display is asked for at a time, so that a form tried again for the
+	// size before (askedDisplay) cannot go out after this one.
+	s.displayMu.Lock()
+	defer s.displayMu.Unlock()
 	s.runMu.Lock()
 	s.cfg.Width, s.cfg.Height, s.cfg.HiDPIScale = w, h, hidpi
 	// The form the host last took: a session that came down to a pixel a
@@ -357,6 +431,7 @@ func (s *Session) Resize(w, h int, hidpi float64) error {
 		rs.mu.Lock()
 		rs.resizeAsked = true
 		rs.askW, rs.askH, rs.askLeft = w, h, formsAfter(form, hidpi)
+		rs.askGen++
 		if rs.askTimer != nil {
 			rs.askTimer.Stop()
 		}
@@ -364,6 +439,10 @@ func (s *Session) Resize(w, h int, hidpi float64) error {
 	}
 	return s.Cipher.EncryptAndSend(s.tcp, displayConfig(w, h, hidpi, hdr, form))
 }
+
+// ownDisplay says whether the session was given a display of its own: asked
+// for, or one the Mac makes for a session apart from its console's.
+func (s *Session) ownDisplay() bool { return s.cfg.Curtain || s.altSession }
 
 // hostForm is the form the host last made the display asked for from
 // (displayConfig): the helper's host is always this Mac.
@@ -391,8 +470,15 @@ func formsAfter(form int, scale float64) []int {
 // askedDisplay reads the host's answer to the display asked for, once its
 // layouts have come to rest: the size asked for, and the form is the host's;
 // another, and the display is asked for again in the next form.
-func (s *Session) askedDisplay(rs *runState) {
+func (s *Session) askedDisplay(rs *runState, gen int) {
+	s.displayMu.Lock()
+	defer s.displayMu.Unlock()
 	rs.mu.Lock()
+	if gen != rs.askGen {
+		// Another size was asked for since: this answer is to the one before.
+		rs.mu.Unlock()
+		return
+	}
 	w, h, sw, sh := rs.askW, rs.askH, rs.scaledW, rs.scaledH
 	near := func(a, b int) bool { return a-b <= 2 && b-a <= 2 }
 	if w <= 0 || h <= 0 || (near(sw, w) && near(sh, h)) || len(rs.askLeft) == 0 {
@@ -778,7 +864,8 @@ func (s *Session) onLayout(rs *runState, h Handler, sw, sh, bw, bh int) {
 		if rs.askTimer != nil {
 			rs.askTimer.Stop()
 		}
-		rs.askTimer = time.AfterFunc(displaySettle, func() { s.askedDisplay(rs) })
+		gen := rs.askGen
+		rs.askTimer = time.AfterFunc(displaySettle, func() { s.askedDisplay(rs, gen) })
 	}
 	rs.mu.Unlock()
 	// Every layout drops the host's arming; a changed size also needs the

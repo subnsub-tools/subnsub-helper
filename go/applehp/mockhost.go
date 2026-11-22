@@ -68,6 +68,7 @@ type MockHost struct {
 	pointers []MockPointer
 	keys     []MockKey
 	cuts     []string
+	clips    []string
 	modes    []bool
 	resizes  [][2]int
 	offers   int
@@ -161,6 +162,13 @@ func (m *MockHost) CutTexts() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.cuts...)
+}
+
+// Clipboards is the text of each clipboard the viewer sent whole (0x1f).
+func (m *MockHost) Clipboards() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.clips...)
 }
 
 func (m *MockHost) Resizes() [][2]int {
@@ -372,6 +380,12 @@ func (m *MockHost) serve(conn net.Conn) {
 				m.modes = append(m.modes, msg[3] == 1)
 				m.mu.Unlock()
 			}
+		case MsgClientClipboardSend:
+			if text, ok := viewerClipboard(msg); ok {
+				m.mu.Lock()
+				m.clips = append(m.clips, text)
+				m.mu.Unlock()
+			}
 		case MsgClientCutText:
 			if len(msg) >= 8 {
 				n := int(binary.BigEndian.Uint32(msg[4:8]))
@@ -387,6 +401,87 @@ func (m *MockHost) serve(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// viewerClipboard reads a clipboard the viewer sent as the Mac does
+// (screensharingd's HandleViewerClipboardSend, then the agent's
+// CreateUncompressedData and UnpackScrapDataWithFilter, macOS 27.2): the
+// two sizes at 8 and 12, a zlib stream of its own that ends where the
+// message does and inflates to the size declared, then the flavors. Every
+// string must end before the archive does, and a flavor with no data is a
+// promise, not text.
+func viewerClipboard(msg []byte) (string, bool) {
+	if len(msg) < 16 {
+		return "", false
+	}
+	raw := int(binary.BigEndian.Uint32(msg[8:12]))
+	zn := int(binary.BigEndian.Uint32(msg[12:16]))
+	if raw == 0 || raw > 100<<20 || zn > 100<<20 || len(msg) != 16+zn {
+		return "", false
+	}
+	zsrc := bytes.NewReader(msg[16:])
+	zr, err := zlib.NewReader(zsrc)
+	if err != nil {
+		return "", false
+	}
+	arc, err := io.ReadAll(io.LimitReader(zr, int64(raw)+1))
+	if err != nil || len(arc) != raw || zsrc.Len() != 0 {
+		return "", false
+	}
+	p := 0
+	word := func() (int, bool) {
+		if p+4 > len(arc) {
+			return 0, false
+		}
+		v := binary.BigEndian.Uint32(arc[p:])
+		p += 4
+		return int(v), v <= uint32(len(arc))
+	}
+	str := func() (string, bool) {
+		n, ok := word()
+		if !ok || p+n >= len(arc) {
+			return "", false
+		}
+		v := string(arc[p : p+n])
+		p += n
+		return v, true
+	}
+	flavors, ok := word()
+	if !ok {
+		return "", false
+	}
+	for i := 0; i < flavors; i++ {
+		uti, ok := str()
+		if !ok {
+			return "", false
+		}
+		if p+4 >= len(arc) { // a word of flags
+			return "", false
+		}
+		p += 4
+		tags, ok := word()
+		if !ok || p >= len(arc) {
+			return "", false
+		}
+		for t := 0; t < tags; t++ {
+			if _, ok := str(); !ok {
+				return "", false
+			}
+			if _, ok := str(); !ok {
+				return "", false
+			}
+		}
+		n, ok := word()
+		if !ok || p+n > len(arc) {
+			return "", false
+		}
+		data := arc[p : p+n]
+		p += n
+		if uti == "public.utf8-plain-text" && n > 0 {
+			return string(data), true
+		}
+	}
+	return "", false
 }
 
 // readClear reads one of the viewer's cleartext messages.
