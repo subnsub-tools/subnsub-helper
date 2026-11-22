@@ -349,6 +349,22 @@ func (s *Session) SetMaxBitrate(bps int) error {
 	return s.reoffer()
 }
 
+// Layout is the display's size as the host last said it (0x451): in points,
+// which is what pointer events are in, and in pixels. Before it has said, the
+// size from the handshake, which for a display of the session's own is that
+// of whatever the Mac showed before it (backingW and backingH are then 0).
+func (s *Session) Layout() (scaledW, scaledH, backingW, backingH int) {
+	s.runMu.Lock()
+	rs := s.run
+	s.runMu.Unlock()
+	if rs == nil {
+		return s.ServerW, s.ServerH, 0, 0
+	}
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.scaledW, rs.scaledH, rs.backingW, rs.backingH
+}
+
 // Canvas is the size the host last said its encoder draws at.
 func (s *Session) Canvas() (w, h, tiles int) {
 	s.runMu.Lock()

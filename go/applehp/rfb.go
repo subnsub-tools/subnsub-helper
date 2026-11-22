@@ -203,13 +203,18 @@ func BuildVirtualDisplay(width, height int, hidpiScale float64, hdr bool, name s
 	for i := 0; i < modeCount; i++ {
 		msw := maxInt(1, int(float64(nativeModes[i][0])*sx+0.5))
 		msh := maxInt(1, int(float64(nativeModes[i][1])*sy+0.5))
-		mw := maxInt(1, int(float64(msw)*hidpiScale+0.5))
-		mh := maxInt(1, int(float64(msh)*hidpiScale+0.5))
+		// macOS reads a mode as its size in points, then that size divided
+		// by the pixel scale: (w, w/2) is w points at twice as many pixels,
+		// (w, w) a pixel a point. Seen on a Mac mini, macOS 15, 2026-11-22:
+		// (2200, 1100) made a display of 2200x1400 points at 4400x2800
+		// pixels, (1100, 550) one of 1100x700 points at 2200x1400.
+		lw := maxInt(1, int(float64(msw)/hidpiScale+0.5))
+		lh := maxInt(1, int(float64(msh)/hidpiScale+0.5))
 		m := 0x9c + 28*i
-		binary.BigEndian.PutUint32(di[m+0x00:m+0x04], uint32(mw))
-		binary.BigEndian.PutUint32(di[m+0x04:m+0x08], uint32(mh))
-		binary.BigEndian.PutUint32(di[m+0x08:m+0x0c], uint32(msw))
-		binary.BigEndian.PutUint32(di[m+0x0c:m+0x10], uint32(msh))
+		binary.BigEndian.PutUint32(di[m+0x00:m+0x04], uint32(msw))
+		binary.BigEndian.PutUint32(di[m+0x04:m+0x08], uint32(msh))
+		binary.BigEndian.PutUint32(di[m+0x08:m+0x0c], uint32(lw))
+		binary.BigEndian.PutUint32(di[m+0x0c:m+0x10], uint32(lh))
 		binary.BigEndian.PutUint64(di[m+0x10:m+0x18], math.Float64bits(60.0))
 		binary.BigEndian.PutUint32(di[m+0x18:m+0x1c], modeFlags)
 	}

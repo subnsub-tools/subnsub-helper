@@ -226,10 +226,11 @@ func (m *MockHost) serve(conn net.Conn) {
 			return
 		}
 		if t == MsgClientVirtualDisplay {
-			// A display of the session's own, at the size it asks for.
-			if w, h, ok := m.noteResize(body); ok {
+			// A display of the session's own, at the size it asks for (the
+			// handshake above said the size of the one before, as a Mac does).
+			if w, h, bw, bh, ok := m.noteResize(body); ok {
 				m.mu.Lock()
-				m.Width, m.Height, m.BackingW, m.BackingH = w, h, w, h
+				m.Width, m.Height, m.BackingW, m.BackingH = w, h, bw, bh
 				m.mu.Unlock()
 			}
 		}
@@ -318,11 +319,11 @@ func (m *MockHost) serve(conn net.Conn) {
 			media = make(chan struct{})
 			go m.stream(conn.RemoteAddr().(*net.TCPAddr).IP, videoKey, audioKey, media)
 		case MsgClientVirtualDisplay:
-			if w, h, ok := m.noteResize(msg); ok {
+			if w, h, bw, bh, ok := m.noteResize(msg); ok {
 				// The new size is said; pictures stop until it is offered for.
 				stopMedia()
 				m.mu.Lock()
-				m.Width, m.Height, m.BackingW, m.BackingH = w, h, w, h
+				m.Width, m.Height, m.BackingW, m.BackingH = w, h, bw, bh
 				m.mu.Unlock()
 				cipher.EncryptAndSend(conn, m.layoutUpdate())
 			}
@@ -411,26 +412,38 @@ func readClear(r io.Reader) (byte, []byte, error) {
 }
 
 // noteResize reads a display configuration and records the size it asks
-// for, where it asks for a display that can change size.
-func (m *MockHost) noteResize(msg []byte) (int, int, bool) {
+// for, where it asks for a display that can change size: as macOS reads it,
+// the mode's first pair is the size in points and the second that size over
+// the pixel scale (BuildVirtualDisplay).
+func (m *MockHost) noteResize(msg []byte) (w, h, bw, bh int, ok bool) {
 	const d = 0x0c
 	if len(msg) < d+0x9c+28 {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	if binary.BigEndian.Uint32(msg[d+0x7a:d+0x7e])&1 == 0 {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	cur := int(binary.BigEndian.Uint16(msg[d+0x92 : d+0x94]))
 	e := d + 0x9c + 28*cur
 	if e+28 > len(msg) {
-		return 0, 0, false
+		return 0, 0, 0, 0, false
 	}
-	w := int(binary.BigEndian.Uint32(msg[e+8 : e+12]))
-	h := int(binary.BigEndian.Uint32(msg[e+12 : e+16]))
+	w = int(binary.BigEndian.Uint32(msg[e : e+4]))
+	h = int(binary.BigEndian.Uint32(msg[e+4 : e+8]))
+	lw := int(binary.BigEndian.Uint32(msg[e+8 : e+12]))
+	lh := int(binary.BigEndian.Uint32(msg[e+12 : e+16]))
+	// Each axis on its own: a mode whose second pair is wrong on one axis
+	// makes a display of other proportions, and the tests see it.
+	scale := func(points, over int) int {
+		if over <= 0 {
+			return 1
+		}
+		return min(max((points+over/2)/over, 1), 3)
+	}
 	m.mu.Lock()
 	m.resizes = append(m.resizes, [2]int{w, h})
 	m.mu.Unlock()
-	return w, h, true
+	return w, h, w * scale(w, lw), h * scale(h, lh), true
 }
 
 // mockAnswer is the answer to a media offer as macOS 15 sends it: a framebuffer update with one

@@ -197,9 +197,16 @@ func (p *hpScreen) status(v map[string]any) {
 	if err != nil {
 		return
 	}
-	// A status is worth waiting for: the viewer acts on it.
+	p.pushWaiting(swToStatus, b)
+}
+
+// pushWaiting is for a frame worth waiting for, which the viewer acts on: a
+// status, or the display's size, which the pointer goes by (a layout lost
+// while the viewer is behind would leave it mapping the pointer by the old
+// size until the next).
+func (p *hpScreen) pushWaiting(kind byte, body []byte) {
 	select {
-	case p.out <- hpFrame{swToStatus, b}:
+	case p.out <- hpFrame{kind, body}:
 	case <-p.ctx.Done():
 	case <-time.After(5 * time.Second):
 	}
@@ -339,7 +346,7 @@ func (p *hpScreen) handler() applehp.Handler {
 			binary.BigEndian.PutUint16(b[2:4], uint16(sh))
 			binary.BigEndian.PutUint16(b[4:6], uint16(bw))
 			binary.BigEndian.PutUint16(b[6:8], uint16(bh))
-			p.push(swToLayout, b)
+			p.pushWaiting(swToLayout, b)
 		},
 		Clipboard: func(text string) {
 			if len(text) > hpClipboardMax {
@@ -590,8 +597,12 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		hpRouteGood = rt.name
 		hpRouteMu.Unlock()
 		cw, ch, _ := sess.Canvas()
+		// The display as the host last said it, in the points the pointer
+		// goes in: for a display of the session's own, the handshake's size
+		// is that of whatever the Mac showed before it.
+		sw, sh, _, _ := sess.Layout()
 		warnf("screen: stream opened (%s, %dx%d)", rt.name, cw, ch)
-		p.status(map[string]any{"s": "live", "w": sess.ServerW, "h": sess.ServerH, "cw": cw, "ch": ch,
+		p.status(map[string]any{"s": "live", "w": sw, "h": sh, "cw": cw, "ch": ch,
 			"own": o.Own, "audio": audio, "input": true, "codec": "avc"})
 		stats := make(chan struct{})
 		go p.stats(sess, stats)

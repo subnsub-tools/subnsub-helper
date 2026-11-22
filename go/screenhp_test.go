@@ -445,3 +445,71 @@ func TestMacKeysym(t *testing.T) {
 		}
 	}
 }
+
+// A display of the session's own at twice as many pixels as points: asked for
+// in points, said so in live and in the layout (not the size of the display
+// before it, which the handshake gives), and resized the same way.
+func TestScreenHPOwnDisplay(t *testing.T) {
+	t.Setenv(screenHPEnvVar, "on")
+	hpLoopbackOnly(t)
+	host := hpMock(t, "pw")
+	v, done := newHPViewer(t, host.Port())
+	v.status(5 * time.Second)
+	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw", "own": true, "w": 1000, "h": 600, "scale": 2})
+	layout := func(want [4]int, within time.Duration) map[string]any {
+		t.Helper()
+		var live map[string]any
+		var got [4]int
+		deadline := time.After(within)
+		for got != want {
+			select {
+			case f, ok := <-v.frames:
+				if !ok {
+					t.Fatalf("the session ended; layout %v", got)
+				}
+				switch f.kind {
+				case swToLayout:
+					if len(f.body) == 8 {
+						got = [4]int{int(binary.BigEndian.Uint16(f.body[0:2])), int(binary.BigEndian.Uint16(f.body[2:4])),
+							int(binary.BigEndian.Uint16(f.body[4:6])), int(binary.BigEndian.Uint16(f.body[6:8]))}
+					}
+				case swToStatus:
+					var m map[string]any
+					json.Unmarshal(f.body, &m)
+					if m["s"] == "end" {
+						t.Fatalf("ended: %v", m)
+					}
+					if m["s"] == "live" {
+						live = m
+					}
+				}
+			case <-deadline:
+				t.Fatalf("layout %v, want %v", got, want)
+			}
+		}
+		return live
+	}
+	live := layout([4]int{1000, 600, 2000, 1200}, 30*time.Second)
+	for live == nil {
+		m := v.status(30 * time.Second)
+		if m["s"] == "end" {
+			t.Fatalf("ended: %v", m)
+		}
+		if m["s"] == "live" {
+			live = m
+		}
+	}
+	if live["w"].(float64) != 1000 || live["h"].(float64) != 600 || live["cw"].(float64) != 2000 {
+		t.Fatalf("live says %v", live)
+	}
+	if r := host.Resizes(); len(r) != 1 || r[0] != [2]int{1000, 600} {
+		t.Fatalf("asked for %v", r)
+	}
+	v.control(map[string]any{"t": "size", "w": 1200, "h": 700, "scale": 2})
+	layout([4]int{1200, 700, 2400, 1400}, 30*time.Second)
+	if r := host.Resizes(); r[len(r)-1] != [2]int{1200, 700} {
+		t.Fatalf("asked for %v", r)
+	}
+	v.w.Close()
+	<-done
+}

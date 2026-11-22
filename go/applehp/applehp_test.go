@@ -723,3 +723,29 @@ func TestEndToEndMockSession(t *testing.T) {
 		t.Fatalf("Annex-B dump invalid: err=%v len=%d", err, len(rawOut))
 	}
 }
+
+// A mode of a display of the session's own is its size in points, then that
+// size over the pixel scale, which is how macOS reads it (BuildVirtualDisplay).
+func TestBuildVirtualDisplayModes(t *testing.T) {
+	for _, c := range []struct {
+		w, h  int
+		scale float64
+		want  [4]uint32
+	}{
+		{1000, 600, 2, [4]uint32{1000, 600, 500, 300}},
+		{1280, 800, 1, [4]uint32{1280, 800, 1280, 800}},
+		{1500, 900, 1.5, [4]uint32{1500, 900, 1000, 600}},
+	} {
+		msg := BuildVirtualDisplay(c.w, c.h, c.scale, false, "")
+		const d = 0x0c
+		cur := int(binary.BigEndian.Uint16(msg[d+0x92 : d+0x94]))
+		e := d + 0x9c + 28*cur
+		var got [4]uint32
+		for i := range got {
+			got[i] = binary.BigEndian.Uint32(msg[e+4*i : e+4*i+4])
+		}
+		if got != c.want {
+			t.Fatalf("%dx%d at %v: mode %v, want %v", c.w, c.h, c.scale, got, c.want)
+		}
+	}
+}
