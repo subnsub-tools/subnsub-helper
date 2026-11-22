@@ -21,6 +21,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -93,8 +94,14 @@ type runState struct {
 	// A new size was asked for and the host has not yet said what it made
 	// of it: its next layout is the answer, whatever it says.
 	resizeAsked bool
-	cursorZ     *chunkInflater
-	clipZ       *chunkInflater
+	// The display asked for, in points, the forms still to try for it, and
+	// the wait for the host's layouts to come to rest before its answer is
+	// read (askedDisplay).
+	askW, askH int
+	askLeft    []int
+	askTimer   *time.Timer
+	cursorZ    *chunkInflater
+	clipZ      *chunkInflater
 }
 
 // Stats returns the counters of the session's current or last Run.
@@ -120,7 +127,18 @@ func (s *Session) Run(ctx context.Context, h Handler) error {
 		return errors.New("applehp: session already running")
 	}
 	s.run = rs
+	if s.cfg.Curtain {
+		rs.askW, rs.askH, rs.askLeft = s.cfg.Width, s.cfg.Height, formsAfter(s.cfg.form, s.cfg.HiDPIScale)
+	}
 	s.runMu.Unlock()
+	defer func() {
+		rs.mu.Lock()
+		if rs.askTimer != nil {
+			rs.askTimer.Stop()
+		}
+		rs.askLeft = nil
+		rs.mu.Unlock()
+	}()
 
 	outer := ctx
 	ctx, cancel := context.WithCancel(ctx)
@@ -249,9 +267,17 @@ func (s *Session) sendEvent(block *[16]byte) error {
 
 // SendPointer is a pointer event: the buttons held as Screen Sharing counts
 // them (bit 0 left, 1 right, 2 middle; 3 and 4 one notch of the wheel up and
-// down, 5 and 6 left and right) and where, in the display's scaled
-// coordinates.
+// down, 5 and 6 left and right) and where, in the display's points. On a
+// display of the session's own the host takes it in the display's pixels: on
+// one of 1024x578 points at 2048x1156 pixels, 400,300 sent as it is put the
+// pointer at 200,150 points (seen 2026-11-22, macOS 15.8.3, read there with
+// CGEventGetLocation). The Mac's own display at more than a pixel a point has
+// not been measured, and is sent the points as before.
 func (s *Session) SendPointer(mask byte, x, y int) error {
+	if sw, sh, bw, bh := s.Layout(); s.cfg.Curtain && sw > 0 && sh > 0 && bw > sw && bh > sh {
+		// The middle of the point.
+		x, y = (2*x+1)*bw/(2*sw), (2*y+1)*bh/(2*sh)
+	}
 	x = min(max(x, 0), 0xffff)
 	y = min(max(y, 0), 0xffff)
 	var p [16]byte
@@ -322,14 +348,76 @@ func (s *Session) Resize(w, h int, hidpi float64) error {
 	}
 	s.runMu.Lock()
 	s.cfg.Width, s.cfg.Height, s.cfg.HiDPIScale = w, h, hidpi
+	// The form the host last took: a session that came down to a pixel a
+	// point stays there.
+	form, hdr := s.cfg.form, s.cfg.HDR
 	rs := s.run
 	s.runMu.Unlock()
 	if rs != nil {
 		rs.mu.Lock()
 		rs.resizeAsked = true
+		rs.askW, rs.askH, rs.askLeft = w, h, formsAfter(form, hidpi)
+		if rs.askTimer != nil {
+			rs.askTimer.Stop()
+		}
 		rs.mu.Unlock()
 	}
-	return s.Cipher.EncryptAndSend(s.tcp, BuildVirtualDisplay(w, h, hidpi, s.cfg.HDR, "subnsub Virtual Display"))
+	return s.Cipher.EncryptAndSend(s.tcp, displayConfig(w, h, hidpi, hdr, form))
+}
+
+// hostForm is the form the host last made the display asked for from
+// (displayConfig): the helper's host is always this Mac.
+var hostForm atomic.Int32
+
+// displaySettle is how long after a layout the host is taken to have said
+// all it has to say of a display: it says each size twice, a moment apart.
+const displaySettle = 900 * time.Millisecond
+
+// formsAfter is the forms left to try when a display asked for in `form` is
+// not the one the host made. At a pixel a point every form is the same.
+func formsAfter(form int, scale float64) []int {
+	if scale <= 1 {
+		return nil
+	}
+	switch form {
+	case formPointsFirst:
+		return []int{formPixelsFirst, formPlain}
+	case formPixelsFirst:
+		return []int{formPointsFirst, formPlain}
+	}
+	return nil
+}
+
+// askedDisplay reads the host's answer to the display asked for, once its
+// layouts have come to rest: the size asked for, and the form is the host's;
+// another, and the display is asked for again in the next form.
+func (s *Session) askedDisplay(rs *runState) {
+	rs.mu.Lock()
+	w, h, sw, sh := rs.askW, rs.askH, rs.scaledW, rs.scaledH
+	near := func(a, b int) bool { return a-b <= 2 && b-a <= 2 }
+	if w <= 0 || h <= 0 || (near(sw, w) && near(sh, h)) || len(rs.askLeft) == 0 {
+		done := w > 0 && h > 0 && near(sw, w) && near(sh, h)
+		rs.askLeft = nil
+		rs.mu.Unlock()
+		if done {
+			s.runMu.Lock()
+			form := s.cfg.form
+			s.runMu.Unlock()
+			if form != formPlain {
+				hostForm.Store(int32(form))
+			}
+		}
+		return
+	}
+	form := rs.askLeft[0]
+	rs.askLeft = rs.askLeft[1:]
+	rs.resizeAsked = true
+	rs.mu.Unlock()
+	s.runMu.Lock()
+	s.cfg.form = form
+	scale, hdr := s.cfg.HiDPIScale, s.cfg.HDR
+	s.runMu.Unlock()
+	_ = s.Cipher.EncryptAndSend(s.tcp, displayConfig(w, h, scale, hdr, form))
 }
 
 // SetMaxBitrate offers the media again with another bandwidth ceiling, in
@@ -685,6 +773,12 @@ func (s *Session) onLayout(rs *runState, h Handler, sw, sh, bw, bh int) {
 	rs.scaledW, rs.scaledH, rs.backingW, rs.backingH = sw, sh, bw, bh
 	if changed {
 		rs.awaitKey = true
+	}
+	if rs.askW > 0 && len(rs.askLeft) > 0 {
+		if rs.askTimer != nil {
+			rs.askTimer.Stop()
+		}
+		rs.askTimer = time.AfterFunc(displaySettle, func() { s.askedDisplay(rs) })
 	}
 	rs.mu.Unlock()
 	// Every layout drops the host's arming; a changed size also needs the

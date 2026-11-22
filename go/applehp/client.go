@@ -39,22 +39,25 @@ func (e *UDPBindError) Unwrap() error { return e.Err }
 
 // Config describes connection, UDP binding, and stream negotiation parameters.
 type Config struct {
-	Host          string
-	Port          int
-	Username      string
-	Password      string
-	AuthMode      string // "srp" (default, auto-falls back to nonsrp) or "nonsrp"
-	LocalTCPAddr  string
-	UDPBindAddr   string
-	UDPCtrlPort   int
-	UDPVideoPort  int
-	ReusePort     bool
-	WarmupTCP     bool
-	WarmupDwell   time.Duration
-	Curtain       bool
-	Width         int
-	Height        int
-	HiDPIScale    float64
+	Host         string
+	Port         int
+	Username     string
+	Password     string
+	AuthMode     string // "srp" (default, auto-falls back to nonsrp) or "nonsrp"
+	LocalTCPAddr string
+	UDPBindAddr  string
+	UDPCtrlPort  int
+	UDPVideoPort int
+	ReusePort    bool
+	WarmupTCP    bool
+	WarmupDwell  time.Duration
+	Curtain      bool
+	Width        int
+	Height       int
+	HiDPIScale   float64
+	// How the display's modes are written for the host (displayForm), as the
+	// handshake wrote them.
+	form          int
 	HDR           bool
 	Codec         string // "avc" (default), "hevc", or "both"
 	TilesPerFrame int
@@ -374,7 +377,8 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 	if cfg.Curtain || altSession {
-		vd := BuildVirtualDisplay(cfg.Width, cfg.Height, cfg.HiDPIScale, cfg.HDR, "subnsub Virtual Display")
+		cfg.form = int(hostForm.Load())
+		vd := displayConfig(cfg.Width, cfg.Height, cfg.HiDPIScale, cfg.HDR, cfg.form)
 		if _, err := writeFull(tc, vd); err != nil {
 			return nil, fmt.Errorf("applehp: send VirtualDisplay: %w", err)
 		}

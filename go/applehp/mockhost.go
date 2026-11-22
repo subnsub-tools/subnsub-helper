@@ -42,6 +42,12 @@ type MockHost struct {
 	Width, Height int
 	BackingW      int
 	BackingH      int
+	// How a mode asking for more than a pixel a point is read (noteResize):
+	// as a Mac that takes its first pair as the pixels and its second as the
+	// points, or as one that makes 800x600 points at twice the pixels of
+	// whatever such mode it is asked for.
+	PixelsFirst bool
+	PlainOnly   bool
 	// The stream: parameter sets, then access units (each a list of NAL
 	// units, the first a key frame), sent round and round at FPS.
 	SPS, PPS []byte
@@ -443,6 +449,13 @@ func (m *MockHost) noteResize(msg []byte) (w, h, bw, bh int, ok bool) {
 	m.mu.Lock()
 	m.resizes = append(m.resizes, [2]int{w, h})
 	m.mu.Unlock()
+	switch {
+	case lw == w && lh == h:
+	case m.PlainOnly:
+		return 800, 600, 1600, 1200, true
+	case m.PixelsFirst:
+		return lw, lh, w, h, true
+	}
 	return w, h, w * scale(w, lw), h * scale(h, lh), true
 }
 

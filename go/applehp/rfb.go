@@ -312,6 +312,33 @@ func BuildSessionSelectCmd2(username, password string, ecbKey []byte) ([]byte, e
 	return out, nil
 }
 
+// How a display of w by h points at a pixel scale is written for the host.
+// Macs read a mode's two pairs differently (seen 2026-11-22, both macOS 15):
+// a Mac mini takes the first pair as the points and the first over the second
+// as the pixel scale, which is what BuildVirtualDisplay writes; a Mac mini
+// 2023 on 15.8.3 takes the first pair as the pixels and the second as the
+// points, and asked the other way makes a display of 800x600 points, or of
+// half the size, whatever was asked. Nothing in what a host says before the
+// display is made tells which, so the session asks one way, reads the size
+// the host made (0x451) and asks the other way when it is not the one asked
+// for; a pixel a point, read the same by both, is what is left.
+const (
+	formPointsFirst = iota
+	formPixelsFirst
+	formPlain
+)
+
+func displayConfig(w, h int, scale float64, hdr bool, form int) []byte {
+	const name = "subnsub Virtual Display"
+	switch {
+	case form == formPlain || scale <= 1:
+		return BuildVirtualDisplay(w, h, 1, hdr, name)
+	case form == formPixelsFirst:
+		return BuildVirtualDisplay(int(float64(w)*scale+0.5), int(float64(h)*scale+0.5), scale, hdr, name)
+	}
+	return BuildVirtualDisplay(w, h, scale, hdr, name)
+}
+
 // ParseAppleDisplayLayout parses an AppleDisplayLayout (0x451) rectangle payload.
 func ParseAppleDisplayLayout(payload []byte) (backingW, backingH int, rects []DisplayRect, ok bool) {
 	if len(payload) < 20 {

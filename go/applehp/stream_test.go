@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -394,5 +395,90 @@ func TestParseUpdateAcrossRecords(t *testing.T) {
 	var n int
 	if _, st := s.parseUpdate(bad, &runState{}, Handler{CursorSelect: func(uint32) { n++ }}); st != parseLost || n != 2 {
 		t.Fatalf("unknown encoding: status %v, %d cursor events", st, n)
+	}
+}
+
+// A display of the session's own on a Mac that reads a mode the other way
+// round, and on one that makes the size asked for only at a pixel a point:
+// the session asks again until the display is the size it asked for, and the
+// pointer goes to the display's pixels.
+func TestOwnDisplayIsTheSizeAskedFor(t *testing.T) {
+	defer hostForm.Store(formPointsFirst)
+	for _, c := range []struct {
+		name               string
+		pixelsFirst, plain bool
+		first, second      [4]int
+		asks               int
+		pointer            [2]int
+	}{
+		{"points first", false, false, [4]int{1000, 600, 2000, 1200}, [4]int{1200, 700, 2400, 1400}, 2, [2]int{801, 601}},
+		{"pixels first", true, false, [4]int{1000, 600, 2000, 1200}, [4]int{1200, 700, 2400, 1400}, 3, [2]int{801, 601}},
+		{"a pixel a point", false, true, [4]int{1000, 600, 1000, 600}, [4]int{1200, 700, 1200, 700}, 4, [2]int{400, 300}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hostForm.Store(formPointsFirst)
+			sps, pps, frames := testFrames()
+			cp, vp := freeUDPPair(t)
+			host := &MockHost{Username: "alice", Password: "pw", Width: 1280, Height: 720, SPS: sps, PPS: pps, Frames: frames, FPS: 30,
+				ClientCtrlPort: cp, ClientVideoPort: vp, PixelsFirst: c.pixelsFirst, PlainOnly: c.plain}
+			if err := host.Listen("127.0.0.1:0"); err != nil {
+				t.Fatal(err)
+			}
+			defer host.Close()
+			cfg := DefaultConfig()
+			cfg.Host, cfg.Port = "127.0.0.1", host.Port()
+			cfg.Username, cfg.Password = "alice", "pw"
+			cfg.UDPBindAddr, cfg.UDPCtrlPort, cfg.UDPVideoPort = "127.0.0.1", cp, vp
+			cfg.WarmupTCP = false
+			cfg.Curtain = true
+			cfg.Width, cfg.Height, cfg.HiDPIScale = 1000, 600, 2
+			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+			defer cancel()
+			sess, err := Connect(ctx, cfg)
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			defer sess.Close()
+			g := &gathered{}
+			done := make(chan error, 1)
+			go func() { done <- sess.Run(ctx, g.handler()) }()
+			settled := func(want [4]int) {
+				t.Helper()
+				waitFor(t, fmt.Sprintf("a display of %v", want), func() bool {
+					g.mu.Lock()
+					defer g.mu.Unlock()
+					return len(g.layouts) > 0 && g.layouts[len(g.layouts)-1] == want
+				})
+				// Nothing more is asked for once it is.
+				time.Sleep(2 * displaySettle)
+				g.mu.Lock()
+				defer g.mu.Unlock()
+				if last := g.layouts[len(g.layouts)-1]; last != want {
+					t.Fatalf("the display went on to %v, want %v", last, want)
+				}
+			}
+			settled(c.first)
+			if err := sess.SendPointer(0, 400, 300); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, "the pointer", func() bool { return len(host.Pointers()) == 1 })
+			if p := host.Pointers()[0]; p.X != c.pointer[0] || p.Y != c.pointer[1] {
+				t.Fatalf("the pointer went to %d,%d, want %v", p.X, p.Y, c.pointer)
+			}
+			// Another size is asked for the way the host took the first.
+			before := len(host.Resizes())
+			if err := sess.Resize(1200, 700, 2); err != nil {
+				t.Fatal(err)
+			}
+			settled(c.second)
+			if n := len(host.Resizes()) - before; n != 1 {
+				t.Fatalf("the second size took %d asks, want 1", n)
+			}
+			if n := len(host.Resizes()); n != c.asks {
+				t.Fatalf("%d asks in all, want %d", n, c.asks)
+			}
+			cancel()
+			<-done
+		})
 	}
 }
