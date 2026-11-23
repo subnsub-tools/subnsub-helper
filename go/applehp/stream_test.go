@@ -501,3 +501,117 @@ func TestOwnDisplayIsTheSizeAskedFor(t *testing.T) {
 		})
 	}
 }
+
+// A standard session: no media is offered, the picture comes whole as
+// rectangles of pixels (deflated and raw, across records) and then where it
+// changed, whichever way round the host writes a pixel, and the pointer still
+// goes.
+func TestStandardSession(t *testing.T) {
+	for _, big := range []bool{false, true} {
+		host := &MockHost{Username: "alice", Password: "pw", Width: 320, Height: 200, PixelsBig: big}
+		if err := host.Listen("127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		cfg := DefaultConfig()
+		cfg.Host, cfg.Port = "127.0.0.1", host.Port()
+		cfg.Username, cfg.Password = "alice", "pw"
+		cfg.WarmupTCP = false
+		cfg.Standard = true
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		sess, err := Connect(ctx, cfg)
+		if err != nil {
+			t.Fatalf("Connect (big %v): %v", big, err)
+		}
+		var mu sync.Mutex
+		var fb []byte
+		fw, fh, ends, sizes, stores := 0, 0, 0, 0, 0
+		h := Handler{
+			PictureSize: func(w, h int) {
+				mu.Lock()
+				fw, fh, fb = w, h, make([]byte, w*h*4)
+				sizes++
+				mu.Unlock()
+			},
+			Picture: func(x, y, w, h int, pix []byte) {
+				mu.Lock()
+				defer mu.Unlock()
+				if x+w > fw || y+h > fh || len(pix) != w*h*4 {
+					t.Errorf("rectangle %dx%d at %d,%d with %d bytes, in a picture of %dx%d", w, h, x, y, len(pix), fw, fh)
+					return
+				}
+				for r := 0; r < h; r++ {
+					copy(fb[((y+r)*fw+x)*4:], pix[r*w*4:(r+1)*w*4])
+				}
+			},
+			PictureEnd:  func() { mu.Lock(); ends++; mu.Unlock() },
+			CursorStore: func(uint32, int, int, int, int, []byte) { mu.Lock(); stores++; mu.Unlock() },
+		}
+		runCtx, stopRun := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- sess.Run(runCtx, h) }()
+
+		want := append([]byte(nil), host.screen()...)
+		for i := 3; i < len(want); i += 4 {
+			want[i] = 0xff
+		}
+		waitFor(t, "the whole picture", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return ends >= 1 && stores == 1 && fw == 320 && fh == 200 && bytes.Equal(fb, want)
+		})
+		if err := host.SendPicture(7, 9, 10, 5, bytes.Repeat([]byte{1, 2, 3, 0}, 50)); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the rectangle that changed", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			at := (9*320 + 7) * 4
+			return bytes.Equal(fb[at:at+4], []byte{1, 2, 3, 0xff}) && bytes.Equal(fb[at-4:at], want[at-4:at])
+		})
+		if err := sess.SendPointer(1, 5, 6); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the pointer", func() bool { p := host.Pointers(); return len(p) == 1 && p[0] == MockPointer{1, 5, 6} })
+		if offers, arms, _ := host.Counts(); offers != 0 || arms < 1 {
+			t.Fatalf("offers %d, arms %d", offers, arms)
+		}
+		if st := sess.Stats(); st.Frames < 2 || st.Bytes == 0 {
+			t.Fatalf("stats %+v", st)
+		}
+		mu.Lock()
+		if sizes != 1 {
+			t.Fatalf("the picture's size was said %d times", sizes)
+		}
+		mu.Unlock()
+		if err := sess.SetMaxBitrate(1_000_000); err != nil {
+			t.Fatal(err)
+		}
+		stopRun()
+		if err := <-done; err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if offers, _, _ := host.Counts(); offers != 0 {
+			t.Fatal("a standard session offered media")
+		}
+		cancel()
+		sess.Close()
+		host.Close()
+	}
+}
+
+func TestPixelFormats(t *testing.T) {
+	// Five, six and five bits, low byte first: all red, then all blue.
+	f := PixelFormat{BitsPerPixel: 16, Depth: 16, TrueColor: true, RedMax: 31, GreenMax: 63, BlueMax: 31, RedShift: 11, GreenShift: 5}
+	if !f.usable() {
+		t.Fatal("16 bits not usable")
+	}
+	if got := f.bgra([]byte{0x00, 0xf8, 0x1f, 0x00}, 2); !bytes.Equal(got, []byte{0, 0, 255, 255, 255, 0, 0, 255}) {
+		t.Fatalf("16 bits: %v", got)
+	}
+	if (PixelFormat{BitsPerPixel: 8}).usable() || (PixelFormat{}).usable() {
+		t.Fatal("a format with no colors of its own is usable")
+	}
+	if got := parsePixelFormat(BuildSetPixelFormat(pixelsBGRX)[4:]); got != pixelsBGRX {
+		t.Fatalf("format written and read: %+v", got)
+	}
+}

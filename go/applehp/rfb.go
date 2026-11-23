@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	MsgClientSetPixelFormat     byte = 0x00
 	MsgClientSetEncodings       byte = 0x02
 	MsgClientFramebufferRequest byte = 0x03
 	MsgClientKeyEvent           byte = 0x04
@@ -29,6 +30,11 @@ const (
 	MsgServerMiscStatus        byte = 0x14
 	MsgServerClipboardSend     byte = 0x1f
 
+	EncRaw            int32 = 0
+	EncZlib           int32 = 6
+	EncDesktopSize    int32 = -223
+	EncApplePointer   int32 = 1100 // 0x44c, no body
+	EncAppleSelector  int32 = 1101 // 0x44d, no body
 	EncAppleMediaInit int32 = 1010 // 0x3f2
 	EncAppleMVS       int32 = 1011 // 0x3f3
 	EncAppleHighQual  int32 = 1002 // 0x3ea
@@ -45,6 +51,15 @@ var (
 	// before and after the enc1103 activation.
 	HPEncodings = []int32{
 		1010, 1011, 1002, 6, 16, 1104, 1100,
+		-223, 1101, 1105, 1107, 1109, 1110,
+	}
+
+	// StandardEncodings is what a standard session takes: the picture as
+	// pixels, raw or deflated, and the host's own rectangles a High
+	// Performance session takes too (cursor, layout, keys). None of Apple's
+	// picture codecs, which nothing here reads.
+	StandardEncodings = []int32{
+		EncZlib, 1104, 1100,
 		-223, 1101, 1105, 1107, 1109, 1110,
 	}
 
@@ -380,5 +395,95 @@ func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
+	return b
+}
+
+// PixelFormat is how a pixel of a standard session's picture is written (RFB's
+// PIXEL_FORMAT, as ServerInit gives it).
+type PixelFormat struct {
+	BitsPerPixel, Depth             uint8
+	BigEndian, TrueColor            bool
+	RedMax, GreenMax, BlueMax       uint16
+	RedShift, GreenShift, BlueShift uint8
+}
+
+// pixelsBGRX is the format asked for when the host's own is not one read
+// here: four bytes a pixel, blue first.
+var pixelsBGRX = PixelFormat{BitsPerPixel: 32, Depth: 24, TrueColor: true, RedMax: 255, GreenMax: 255, BlueMax: 255, RedShift: 16, GreenShift: 8}
+
+func parsePixelFormat(b []byte) PixelFormat {
+	if len(b) < 13 {
+		return PixelFormat{}
+	}
+	return PixelFormat{BitsPerPixel: b[0], Depth: b[1], BigEndian: b[2] != 0, TrueColor: b[3] != 0,
+		RedMax: binary.BigEndian.Uint16(b[4:6]), GreenMax: binary.BigEndian.Uint16(b[6:8]), BlueMax: binary.BigEndian.Uint16(b[8:10]),
+		RedShift: b[10], GreenShift: b[11], BlueShift: b[12]}
+}
+
+// usable says whether pixels of this format are read here: colors of their
+// own, in one, two or four bytes.
+func (f PixelFormat) usable() bool {
+	if !f.TrueColor || f.RedMax == 0 || f.GreenMax == 0 || f.BlueMax == 0 {
+		return false
+	}
+	if f.BitsPerPixel != 8 && f.BitsPerPixel != 16 && f.BitsPerPixel != 32 {
+		return false
+	}
+	return f.RedShift < f.BitsPerPixel && f.GreenShift < f.BitsPerPixel && f.BlueShift < f.BitsPerPixel
+}
+
+func (f PixelFormat) bytes() int { return int(f.BitsPerPixel) / 8 }
+
+// bgra turns n pixels of this format into BGRA with nothing transparent. raw
+// is used for the answer where it already is that, but for its fourth byte.
+func (f PixelFormat) bgra(raw []byte, n int) []byte {
+	if f.BitsPerPixel == 32 && !f.BigEndian && f.RedShift == 16 && f.GreenShift == 8 && f.BlueShift == 0 &&
+		f.RedMax == 255 && f.GreenMax == 255 && f.BlueMax == 255 {
+		for i := 3; i < n*4; i += 4 {
+			raw[i] = 0xff
+		}
+		return raw[:n*4]
+	}
+	out := make([]byte, n*4)
+	size := f.bytes()
+	rm, gm, bm := uint32(f.RedMax), uint32(f.GreenMax), uint32(f.BlueMax)
+	for i := 0; i < n; i++ {
+		var v uint32
+		p := raw[i*size:]
+		switch {
+		case size == 1:
+			v = uint32(p[0])
+		case size == 2 && f.BigEndian:
+			v = uint32(binary.BigEndian.Uint16(p))
+		case size == 2:
+			v = uint32(binary.LittleEndian.Uint16(p))
+		case f.BigEndian:
+			v = binary.BigEndian.Uint32(p)
+		default:
+			v = binary.LittleEndian.Uint32(p)
+		}
+		out[i*4] = byte((v >> f.BlueShift & bm) * 255 / bm)
+		out[i*4+1] = byte((v >> f.GreenShift & gm) * 255 / gm)
+		out[i*4+2] = byte((v >> f.RedShift & rm) * 255 / rm)
+		out[i*4+3] = 0xff
+	}
+	return out
+}
+
+// BuildSetPixelFormat encodes RFB's SetPixelFormat (0x00).
+func BuildSetPixelFormat(f PixelFormat) []byte {
+	b := make([]byte, 20)
+	b[0] = MsgClientSetPixelFormat
+	b[4], b[5] = f.BitsPerPixel, f.Depth
+	if f.BigEndian {
+		b[6] = 1
+	}
+	if f.TrueColor {
+		b[7] = 1
+	}
+	binary.BigEndian.PutUint16(b[8:10], f.RedMax)
+	binary.BigEndian.PutUint16(b[10:12], f.GreenMax)
+	binary.BigEndian.PutUint16(b[12:14], f.BlueMax)
+	b[14], b[15], b[16] = f.RedShift, f.GreenShift, f.BlueShift
 	return b
 }

@@ -8,6 +8,10 @@ package applehp
 // shapes, the display's layout, the clipboard, answers to a new offer), the
 // video socket (H.264 access units) and the control socket's media side
 // (audio, and the host's RTCP, which is read and dropped).
+//
+// A standard session (Config.Standard) has the control stream alone, and its
+// picture comes there: rectangles of the display's pixels, sent when they
+// change, as RFB has always sent them (Handler.Picture).
 
 import (
 	"bytes"
@@ -34,6 +38,13 @@ const (
 	// How much of a message that spans records is kept before the stream is
 	// taken to be out of step and picked up again at the next record.
 	streamPendMax = 8 << 20
+	// The same for a standard session, whose pictures come on the stream: a
+	// whole display of pixels that did not deflate.
+	picturePendMax = 160 << 20
+	// The most pixels a picture or one rectangle of it holds, and the
+	// longest side: what the viewer has room for, and its frames can say.
+	picturePixelsMax = 48 << 20
+	pictureSideMax   = 16384
 	// A cursor is small; a size beyond this is a parse gone wrong.
 	cursorSideMax = 512
 	// One clipboard, inflated.
@@ -68,6 +79,13 @@ type Handler struct {
 	Layout func(scaledW, scaledH, backingW, backingH int)
 	// The host's clipboard, as text.
 	Clipboard func(text string)
+	// A standard session's picture. PictureSize: the whole picture's size in
+	// pixels, before its first rectangle and whenever it changes. Picture:
+	// the pixels of one rectangle (BGRA rows, none transparent).
+	// PictureEnd: the rectangles of one update have all been handed over.
+	PictureSize func(w, h int)
+	Picture     func(x, y, w, h int, bgra []byte)
+	PictureEnd  func()
 }
 
 // Stats is what a running session has counted. VideoBad and AudioBad are
@@ -75,6 +93,8 @@ type Handler struct {
 type Stats struct {
 	VideoPackets, VideoBad int
 	Frames, Keyframes      int
+	// Rectangles of a standard session's picture handed over.
+	Pictures               int
 	FramesLost             int
 	AudioPackets, AudioBad int
 	Bytes                  int64
@@ -106,6 +126,12 @@ type runState struct {
 	askGen  int
 	cursorZ *chunkInflater
 	clipZ   *chunkInflater
+	// A standard session's picture: its size, the stream its rectangles are
+	// deflated in, and what ended it (a rectangle that could not be read
+	// leaves every one after it unreadable).
+	picW, picH int
+	picZ       *chunkInflater
+	picErr     error
 }
 
 // Stats returns the counters of the session's current or last Run.
@@ -124,13 +150,16 @@ func (s *Session) Stats() Stats {
 // Run carries the session until ctx ends, the host closes the control
 // stream, or a socket fails. It returns nil only for ctx.
 func (s *Session) Run(ctx context.Context, h Handler) error {
-	rs := &runState{awaitKey: true, scaledW: s.ServerW, scaledH: s.ServerH}
+	rs := &runState{awaitKey: !s.standard, scaledW: s.ServerW, scaledH: s.ServerH}
 	s.runMu.Lock()
 	if s.run != nil {
 		s.runMu.Unlock()
 		return errors.New("applehp: session already running")
 	}
 	s.run = rs
+	if s.standard {
+		rs.picW, rs.picH = s.ServerW, s.ServerH
+	}
 	if s.ownDisplay() {
 		rs.askW, rs.askH, rs.askLeft = s.cfg.Width, s.cfg.Height, formsAfter(s.cfg.form, s.cfg.HiDPIScale)
 	}
@@ -155,15 +184,22 @@ func (s *Session) Run(ctx context.Context, h Handler) error {
 		_ = s.Close()
 	}()
 
+	if s.standard && h.PictureSize != nil && rs.picW > 0 && rs.picH > 0 {
+		h.PictureSize(rs.picW, rs.picH)
+	}
 	// The host frees its cursor and layout messages only while its
-	// framebuffer sender is armed.
+	// framebuffer sender is armed; a standard session's picture comes the
+	// same way, whole at first and then where it changed.
 	_ = s.arm()
 	_ = s.Cipher.EncryptAndSend(s.tcp, []byte{MsgClientAutoPasteboard, 0, 0, 1, 0, 0, 0, 0})
 
-	wg.Add(3)
+	wg.Add(1)
 	go func() { defer wg.Done(); errc <- s.readControl(ctx, rs, h) }()
-	go func() { defer wg.Done(); errc <- s.readVideo(ctx, rs, h) }()
-	go func() { defer wg.Done(); errc <- s.readMedia(ctx, rs, h) }()
+	if !s.standard {
+		wg.Add(2)
+		go func() { defer wg.Done(); errc <- s.readVideo(ctx, rs, h) }()
+		go func() { defer wg.Done(); errc <- s.readMedia(ctx, rs, h) }()
+	}
 
 	tick := time.NewTicker(feedbackEvery)
 	defer tick.Stop()
@@ -174,6 +210,9 @@ loop:
 		case err = <-errc:
 			break loop
 		case <-tick.C:
+			if s.standard {
+				continue
+			}
 			var fir *uint32
 			rs.mu.Lock()
 			if rs.awaitKey && rs.primarySSRC != 0 && time.Since(rs.lastKeyAsk) >= keyAskEvery {
@@ -217,6 +256,11 @@ func (s *Session) arm() error {
 // RequestKeyframe asks the host for a picture that needs no other, at the
 // next report.
 func (s *Session) RequestKeyframe() {
+	if s.standard {
+		// The whole picture again.
+		_ = s.arm()
+		return
+	}
 	s.runMu.Lock()
 	rs := s.run
 	s.runMu.Unlock()
@@ -513,6 +557,9 @@ func (s *Session) SetMaxBitrate(bps int) error {
 	if bps < 0 {
 		return fmt.Errorf("applehp: bitrate %d out of range", bps)
 	}
+	if s.standard {
+		return nil
+	}
 	s.runMu.Lock()
 	same := s.cfg.MaxBitrate == bps
 	s.cfg.MaxBitrate = bps
@@ -572,6 +619,19 @@ func (s *Session) reoffer() error {
 
 func (s *Session) readControl(ctx context.Context, rs *runState, h Handler) error {
 	var pend []byte
+	// A standard session that lost its place cannot find it again: its
+	// pictures span records, so the next record may begin inside one, and
+	// the stream its rectangles are deflated in goes on from what was lost.
+	// The session ends, and the viewer opens another.
+	pendMax, lostPlace := streamPendMax, false
+	if s.standard {
+		pendMax = picturePendMax
+	}
+	lost := func() {
+		if s.standard {
+			lostPlace = true
+		}
+	}
 	feed := func(body []byte) {
 		if len(pend) == 0 {
 			pend = body
@@ -581,13 +641,15 @@ func (s *Session) readControl(ctx context.Context, rs *runState, h Handler) erro
 		for len(pend) > 0 {
 			n, st := s.parseServer(pend, rs, h)
 			if st == parseMore {
-				if len(pend) > streamPendMax {
+				if len(pend) > pendMax {
 					pend = nil
+					lost()
 				}
 				return
 			}
 			if st == parseLost || n <= 0 || n > len(pend) {
 				pend = nil
+				lost()
 				return
 			}
 			pend = pend[n:]
@@ -606,6 +668,15 @@ func (s *Session) readControl(ctx context.Context, rs *runState, h Handler) erro
 		enc = enc[used:]
 		for _, m := range msgs {
 			feed(m)
+		}
+		rs.mu.Lock()
+		picErr := rs.picErr
+		rs.mu.Unlock()
+		if picErr != nil {
+			return picErr
+		}
+		if lostPlace {
+			return errors.New("applehp: the standard session's control stream cannot be followed")
 		}
 		if len(enc) >= 2 {
 			if n := int(binary.BigEndian.Uint16(enc[0:2])); n == 0 || n%enc1103BlockSize != 0 {
@@ -718,10 +789,21 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 	rects := int(binary.BigEndian.Uint16(b[2:4]))
 	pos := 4
 	var evs []pendingEvent
+	// The bytes of the update's pixels as they came, and whether it had any.
+	pictures, wire := false, 0
 	done := func(st parseStatus) (int, parseStatus) {
 		if st != parseMore {
 			for _, e := range evs {
 				e()
+			}
+			if pictures {
+				rs.mu.Lock()
+				rs.stats.Frames++
+				rs.stats.Bytes += int64(wire)
+				rs.mu.Unlock()
+				if h.PictureEnd != nil {
+					h.PictureEnd()
+				}
 			}
 		}
 		return pos, st
@@ -744,6 +826,71 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 			}
 			n := 2 + int(binary.BigEndian.Uint16(b[p:p+2]))
 			return n, p+n <= len(b)
+		}
+		if s.standard {
+			// The picture, and the rectangles that say something of it.
+			taken := true
+			switch enc {
+			case EncRaw:
+				if w*hh > picturePixelsMax {
+					return done(parseLost)
+				}
+				n := w * hh * s.pixels.bytes()
+				if p+n > len(b) {
+					return 0, parseMore
+				}
+				if n > 0 {
+					raw := b[p : p+n]
+					evs = append(evs, func() { s.onPixels(rs, h, x, y, w, hh, append([]byte(nil), raw...)) })
+					pictures, wire = true, wire+n
+				}
+				pos = p + n
+			case EncZlib:
+				if p+4 > len(b) {
+					return 0, parseMore
+				}
+				zn := int(binary.BigEndian.Uint32(b[p : p+4]))
+				if zn > picturePendMax || w*hh > picturePixelsMax {
+					return done(parseLost)
+				}
+				if p+4+zn > len(b) {
+					return 0, parseMore
+				}
+				z := b[p+4 : p+4+zn]
+				evs = append(evs, func() {
+					if rs.picZ == nil {
+						rs.picZ = &chunkInflater{most: picturePixelsMax * 4, strict: true}
+					}
+					if w == 0 || hh == 0 {
+						// No pixels, but what it holds is part of the stream
+						// the next rectangle is deflated in.
+						rs.picZ.feed(z)
+						return
+					}
+					raw, err := rs.picZ.inflate(z, w*hh*s.pixels.bytes())
+					if err != nil {
+						rs.mu.Lock()
+						if rs.picErr == nil {
+							rs.picErr = fmt.Errorf("applehp: picture rectangle %dx%d at %d,%d (%d bytes deflated): %w", w, hh, x, y, zn, err)
+						}
+						rs.mu.Unlock()
+						return
+					}
+					s.onPixels(rs, h, x, y, w, hh, raw)
+				})
+				pictures, wire = true, wire+zn
+				pos = p + 4 + zn
+			case EncApplePointer, EncAppleSelector:
+				pos = p
+			case EncDesktopSize:
+				evs = append(evs, func() { s.onPictureSize(rs, h, w, hh) })
+				pos = p
+			default:
+				taken = false
+			}
+			if taken {
+				continue
+			}
 		}
 		switch enc {
 		case EncAppleCursor:
@@ -840,10 +987,58 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 			// the counters carry over; say so rather than read on wrongly.
 			return done(parseLost)
 		default:
+			if s.standard {
+				s.cfg.logf("standard: a rectangle of encoding %d (0x%x), %dx%d at %d,%d, is not read", enc, uint32(enc), w, hh, x, y)
+			}
 			return done(parseLost)
 		}
 	}
 	return done(parseOK)
+}
+
+// onPictureSize is the size of a standard session's picture, said to the
+// handler when it is not the size it knows.
+func (s *Session) onPictureSize(rs *runState, h Handler, w, hh int) {
+	if w <= 0 || hh <= 0 {
+		return
+	}
+	rs.mu.Lock()
+	if w > pictureSideMax || hh > pictureSideMax || w*hh > picturePixelsMax {
+		if rs.picErr == nil {
+			rs.picErr = fmt.Errorf("applehp: a picture of %dx%d is more than is shown", w, hh)
+		}
+		rs.mu.Unlock()
+		return
+	}
+	same := rs.picW == w && rs.picH == hh
+	rs.picW, rs.picH = w, hh
+	rs.mu.Unlock()
+	if !same && h.PictureSize != nil {
+		h.PictureSize(w, hh)
+	}
+}
+
+// onPixels hands over one rectangle of a standard session's picture, as the
+// host wrote its pixels. A rectangle past the picture's edge makes the
+// picture that large: the host said its size in points and draws in pixels.
+func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte) {
+	rs.mu.Lock()
+	pw, ph := max(rs.picW, x+w), max(rs.picH, y+hh)
+	if pw > rs.picW || ph > rs.picH {
+		// Likely the display's pixels, which the layout said.
+		pw, ph = max(pw, rs.backingW), max(ph, rs.backingH)
+	}
+	rs.mu.Unlock()
+	s.onPictureSize(rs, h, pw, ph)
+	rs.mu.Lock()
+	fits := rs.picErr == nil && x+w <= rs.picW && y+hh <= rs.picH
+	if fits {
+		rs.stats.Pictures++
+	}
+	rs.mu.Unlock()
+	if fits && h.Picture != nil {
+		h.Picture(x, y, w, hh, s.pixels.bgra(raw, w*hh))
+	}
 }
 
 func (s *Session) onLayout(rs *runState, h Handler, sw, sh, bw, bh int) {
@@ -853,7 +1048,7 @@ func (s *Session) onLayout(rs *runState, h Handler, sw, sh, bw, bh int) {
 	rs.mu.Lock()
 	// The size changed: the answer to a resize, or a layout unlike the one
 	// before it.
-	changed := rs.resizeAsked || (rs.layouts > 0 && (bw != rs.backingW || bh != rs.backingH))
+	changed := !s.standard && (rs.resizeAsked || (rs.layouts > 0 && (bw != rs.backingW || bh != rs.backingH)))
 	rs.resizeAsked = false
 	rs.layouts++
 	rs.scaledW, rs.scaledH, rs.backingW, rs.backingH = sw, sh, bw, bh
@@ -976,10 +1171,26 @@ type chunkInflater struct {
 	in   bytes.Buffer
 	zr   io.ReadCloser
 	dead bool
+	// The most one piece inflates to; zero is 16 MB.
+	most int
+	// A piece has to be all of what it inflates to: one that holds more
+	// than the size given is an error, not the start of the next.
+	strict bool
+}
+
+// chunkSlack is what a piece may leave unread once its bytes are out: the
+// empty block a flush ends with, or a stream's last block and checksum.
+const chunkSlack = 16
+
+// feed adds a piece nothing is read from now to the running stream.
+func (c *chunkInflater) feed(piece []byte) {
+	if !c.dead && len(piece) > 0 {
+		c.in.Write(piece)
+	}
 }
 
 func (c *chunkInflater) inflate(piece []byte, want int) ([]byte, error) {
-	if want <= 0 || want > 16<<20 {
+	if want <= 0 || want > max(c.most, 16<<20) {
 		return nil, errors.New("applehp: inflate size out of range")
 	}
 	fresh := func() ([]byte, error) {
@@ -1003,6 +1214,11 @@ func (c *chunkInflater) inflate(piece []byte, want int) ([]byte, error) {
 		if err == nil {
 			out := make([]byte, want)
 			if _, err = io.ReadFull(c.zr, out); err == nil {
+				if c.strict && c.in.Len() > chunkSlack {
+					c.dead = true
+					c.in.Reset()
+					return nil, errors.New("applehp: a piece holds more than its size")
+				}
 				return out, nil
 			}
 		}

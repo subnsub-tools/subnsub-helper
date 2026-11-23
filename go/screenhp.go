@@ -42,6 +42,9 @@ package main
 //	                6 cursor shown: id u32       7 clipboard (UTF-8)
 //	                8 layout: the display in points w h, the picture in
 //	                  pixels w h, u16 each
+//	                9 picture (a standard session): x y w h u16 (pixels),
+//	                  flags (1 = the update is whole: show it), then the
+//	                  rectangle's BGRA rows, deflated (no zlib header)
 //	from the viewer 1 control (JSON): open {codecs, audio, kbps, user,
 //	                  password, own, w, h, scale}, size {w h scale}, kbps,
 //	                  mode {observe} (told to the Mac, as its own viewer does),
@@ -55,12 +58,21 @@ package main
 //	                4 scroll: dx dy i16 (pixels, as a browser's wheel says
 //	                  them), x y u16
 //
+// standard in open asks for no video: the Mac's display as it is, sent as
+// Screen Sharing's standard mode sends it, the pixels of what changed and
+// nothing while nothing does (user 2026-11-23: the Mac showing a High
+// Performance stream runs hot, and the system's own standard mode does
+// not). It has no sound. The hello says "standard" where the helper has it,
+// and "own" where this Mac makes a display for a session.
+//
 // own asks for a display of the session's own, which takes the size asked
 // for and follows the viewer's window (Dynamic resolution); the Mac's own
 // displays are blanked while it lasts. Without it the session shows the
 // Mac's main display as it is.
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -89,6 +101,7 @@ const (
 	swToCursorSelect = 6
 	swToClipboard    = 7
 	swToLayout       = 8
+	swToPicture      = 9
 
 	swFromControl = 1
 	swFromPointer = 2
@@ -104,7 +117,13 @@ const (
 	hpVideoAhead = 24
 	// One frame either way: a control message is small; a picture is not,
 	// but it is less than the three bytes of a frame's length can say.
-	hpFrameMax     = 8 << 20
+	hpFrameMax = 8 << 20
+	// A standard session's picture goes in pieces of about this many bytes
+	// of pixels, and no more than this much of it, deflated, waits for the
+	// viewer: past that the Mac's own stream waits, and the Mac sends what
+	// the display has become rather than every state it went through.
+	hpPictureBand  = 1 << 20
+	hpPictureAhead = 12 << 20
 	hpControlMax   = 300 << 10
 	hpClipboardMax = 256 << 10
 	hpConnectWait  = 40 * time.Second
@@ -165,6 +184,15 @@ type hpScreen struct {
 	hold    bool // video is being dropped until the next key frame
 	ahead   int  // video frames waiting for the viewer
 	dropped int
+	// A standard session, the size of its picture in pixels, and how much
+	// of it waits for the viewer.
+	standard   bool
+	picW, picH int
+	picAhead   int
+	deflate    *flate.Writer
+	// Ends with the session on the route being tried: what a session that
+	// is being let go still has to say is not waited for.
+	route context.Context
 	// The decoder configuration the viewer has not been sent yet: it goes
 	// ahead of the key frame it is for, and waits for one that goes.
 	conf []byte
@@ -352,11 +380,15 @@ func (p *hpScreen) handler() applehp.Handler {
 			p.push(swToCursorSelect, binary.BigEndian.AppendUint32(nil, id))
 		},
 		Layout: func(sw, sh, bw, bh int) {
+			p.mu.Lock()
 			if sw > 0 && bw > 0 {
-				p.mu.Lock()
 				p.scale = min(max((bw+sw/2)/sw, 1), 4)
-				p.mu.Unlock()
 			}
+			if p.standard && p.picW > 0 {
+				// The picture is the size its rectangles are drawn in.
+				bw, bh = p.picW, p.picH
+			}
+			p.mu.Unlock()
 			b := make([]byte, 8)
 			binary.BigEndian.PutUint16(b[0:2], uint16(sw))
 			binary.BigEndian.PutUint16(b[2:4], uint16(sh))
@@ -370,19 +402,108 @@ func (p *hpScreen) handler() applehp.Handler {
 			}
 			p.push(swToClipboard, []byte(text))
 		},
+		PictureSize: func(w, h int) {
+			p.mu.Lock()
+			p.picW, p.picH = w, h
+			sess := p.sess
+			p.mu.Unlock()
+			if sess == nil {
+				return
+			}
+			// The layout again, with the picture's new size.
+			sw, sh, _, _ := sess.Layout()
+			b := make([]byte, 8)
+			binary.BigEndian.PutUint16(b[0:2], uint16(sw))
+			binary.BigEndian.PutUint16(b[2:4], uint16(sh))
+			binary.BigEndian.PutUint16(b[4:6], uint16(w))
+			binary.BigEndian.PutUint16(b[6:8], uint16(h))
+			p.pushLayout(b)
+		},
+		Picture: func(x, y, w, h int, bgra []byte) {
+			if w <= 0 || h <= 0 || len(bgra) < w*h*4 {
+				return
+			}
+			rows := max(1, hpPictureBand/(w*4))
+			for top := 0; top < h; top += rows {
+				n := min(rows, h-top)
+				p.pushPicture(x, y+top, w, n, 0, bgra[top*w*4:(top+n)*w*4])
+			}
+		},
+		PictureEnd: func() { p.pushPicture(0, 0, 0, 0, 1, nil) },
+	}
+}
+
+// pushPicture queues one piece of a standard session's picture, deflated, or
+// the word that an update is whole. It waits for room: a piece left out
+// would stay wrong on the viewer's screen until that place changed again.
+func (p *hpScreen) pushPicture(x, y, w, h int, flags byte, bgra []byte) {
+	var zb bytes.Buffer
+	b := make([]byte, 9)
+	binary.BigEndian.PutUint16(b[0:2], uint16(x))
+	binary.BigEndian.PutUint16(b[2:4], uint16(y))
+	binary.BigEndian.PutUint16(b[4:6], uint16(w))
+	binary.BigEndian.PutUint16(b[6:8], uint16(h))
+	b[8] = flags
+	zb.Write(b)
+	if len(bgra) > 0 {
+		// One update's pieces come one at a time, from the control stream's reader.
+		if p.deflate == nil {
+			p.deflate, _ = flate.NewWriter(&zb, flate.BestSpeed)
+		} else {
+			p.deflate.Reset(&zb)
+		}
+		p.deflate.Write(bgra)
+		p.deflate.Close()
+	}
+	body := zb.Bytes()
+	p.mu.Lock()
+	ctx := p.route
+	p.mu.Unlock()
+	if ctx == nil {
+		ctx = p.ctx
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	for {
+		p.mu.Lock()
+		room := p.picAhead < hpPictureAhead
+		if room {
+			p.picAhead += len(body)
+		}
+		p.mu.Unlock()
+		if room {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	select {
+	case p.out <- hpFrame{swToPicture, body}:
+	case <-ctx.Done():
+		p.mu.Lock()
+		p.picAhead = max(p.picAhead-len(body), 0)
+		p.mu.Unlock()
 	}
 }
 
 // taken is the writer saying a frame went to the viewer.
-func (p *hpScreen) taken(kind byte) {
-	if kind != swToVideoFrame {
-		return
+func (p *hpScreen) taken(f hpFrame) {
+	switch f.kind {
+	case swToVideoFrame:
+		p.mu.Lock()
+		if p.ahead > 0 {
+			p.ahead--
+		}
+		p.mu.Unlock()
+	case swToPicture:
+		p.mu.Lock()
+		p.picAhead = max(p.picAhead-len(f.body), 0)
+		p.mu.Unlock()
 	}
-	p.mu.Lock()
-	if p.ahead > 0 {
-		p.ahead--
-	}
-	p.mu.Unlock()
 }
 
 // What the viewer sends as control.
@@ -394,6 +515,7 @@ type hpCommand struct {
 	User     string   `json:"user"`
 	Password string   `json:"password"`
 	Own      bool     `json:"own"`
+	Standard bool     `json:"standard"`
 	W        int      `json:"w"`
 	H        int      `json:"h"`
 	Scale    float64  `json:"scale"`
@@ -477,11 +599,29 @@ func hpRoutes() []hpRoute {
 	return routes
 }
 
+// hpStandardRoutes is the routes a standard session is tried on: it has no
+// media to be delivered, so the loopback address first, and each way of
+// reaching the Mac once.
+func hpStandardRoutes(routes []hpRoute) []hpRoute {
+	var lo, rest []hpRoute
+	for _, r := range routes {
+		switch {
+		case r.reusePort:
+		case r.local == "127.0.0.1":
+			lo = append(lo, r)
+		default:
+			rest = append(rest, r)
+		}
+	}
+	return append(lo, rest...)
+}
+
 // hpConnect is applehp.Connect, and hpRouteList the routes it is tried on;
 // a test puts its own in.
 var (
 	hpConnect   = applehp.Connect
 	hpRouteList = hpRoutes
+	hpOwnHere   = hpOwnDisplayHere
 )
 
 // run is the session, from the viewer's open to its end: sign in, find the
@@ -504,26 +644,41 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		kbps = hpKbpsDefault
 	}
 	kbps = min(max(kbps, hpKbpsMin), hpKbpsMax)
-	audio := o.Audio == nil || *o.Audio
+	standard := o.Standard
+	// A standard session has no sound.
+	audio := (o.Audio == nil || *o.Audio) && !standard
+	// A display of the session's own only where this Mac makes one
+	// (hpOwnDisplayHere); elsewhere the session shows the Mac's display as
+	// it is, and live says so. A standard session shows the Mac's display.
+	own := o.Own && !standard && hpOwnHere()
 	base := applehp.DefaultConfig()
 	base.Port = port
 	base.Username = name
 	base.Password = o.Password
 	base.AudioEnabled = audio
-	base.Curtain = o.Own
+	base.Curtain = own
 	base.MaxBitrate = kbps * 1000
-	if o.Own && o.W >= 320 && o.H >= 200 && o.W <= 7680 && o.H <= 4320 {
+	base.Standard = standard
+	if standard {
+		// What a standard session could not read is worth a line in the log.
+		base.Logf = func(format string, args ...any) { warnf("screen: "+format, args...) }
+	}
+	if own && o.W >= 320 && o.H >= 200 && o.W <= 7680 && o.H <= 4320 {
 		base.Width, base.Height = o.W, o.H
 		if o.Scale >= 1 && o.Scale <= 3 {
 			base.HiDPIScale = o.Scale
 		}
 	}
 	p.mu.Lock()
-	p.own, p.audio = o.Own, audio
+	p.own, p.audio, p.standard = own, audio, standard
 	p.mu.Unlock()
 	p.status(map[string]any{"s": "connecting"})
 	why := "failed"
-	for i, rt := range hpRouteList() {
+	routes := hpRouteList()
+	if standard {
+		routes = hpStandardRoutes(routes)
+	}
+	for i, rt := range routes {
 		if p.ctx.Err() != nil {
 			return
 		}
@@ -535,7 +690,7 @@ func (p *hpScreen) run(o hpCommand, port int) {
 			}
 		}
 		cfg := base
-		if o.Own {
+		if own {
 			p.mu.Lock()
 			if w := p.want; w != nil {
 				cfg.Width, cfg.Height, cfg.HiDPIScale = w.w, w.h, w.scale
@@ -575,24 +730,26 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		rctx, rcancel := context.WithCancel(p.ctx)
 		p.mu.Lock()
 		p.sess = sess
+		p.route = rctx
 		p.hold, p.ahead = false, 0
 		// A size asked for while this route was signing in: from here the
 		// viewer's sizes go to the session themselves.
 		late := p.want
 		p.mu.Unlock()
 		go func() { done <- sess.Run(rctx, p.handler()) }()
-		if o.Own && late != nil && (late.w != cfg.Width || late.h != cfg.Height || late.scale != cfg.HiDPIScale) {
+		if own && late != nil && (late.w != cfg.Width || late.h != cfg.Height || late.scale != cfg.HiDPIScale) {
 			_ = sess.Resize(late.w, late.h, late.scale)
 		}
 		// Signed in and answered is not yet a picture: the media has to find
 		// its way to this process.
-		live := false
+		live, ended := false, false
 		wait := time.NewTimer(hpFirstPicture)
 		tick := time.NewTicker(100 * time.Millisecond)
 	first:
 		for {
 			select {
 			case err = <-done:
+				ended = true
 				break first
 			case <-wait.C:
 				break first
@@ -600,8 +757,10 @@ func (p *hpScreen) run(o hpCommand, port int) {
 				break first
 			case <-tick.C:
 				// Packets that authenticate as this session's: its media
-				// finds this process on this route.
-				if st := sess.Stats(); st.VideoPackets-st.VideoBad > 0 {
+				// finds this process on this route. A standard session's
+				// picture comes on the connection itself: its first pixels
+				// (the update they are part of may take longer to go).
+				if st := sess.Stats(); st.VideoPackets-st.VideoBad > 0 || (standard && st.Pictures > 0) {
 					live = true
 					break first
 				}
@@ -612,27 +771,44 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		if !live {
 			rcancel()
 			_ = sess.Close()
+			if !ended {
+				// Nothing more of this session once the next is tried.
+				<-done
+			}
 			p.mu.Lock()
 			p.sess = nil
 			p.mu.Unlock()
 			if p.ctx.Err() != nil {
 				return
 			}
+			if standard {
+				warnf("screen: standard route %s: signed in, no picture arrived (%v)", rt.name, err)
+				why = "no-picture"
+				continue
+			}
 			warnf("screen: stream route %s: signed in, no media arrived", rt.name)
 			why = "no-media"
 			continue
 		}
-		hpRouteMu.Lock()
-		hpRouteGood = rt.name
-		hpRouteMu.Unlock()
+		codec := "avc"
 		cw, ch, _ := sess.Canvas()
+		if standard {
+			codec = "pixels"
+			p.mu.Lock()
+			cw, ch = p.picW, p.picH
+			p.mu.Unlock()
+		} else {
+			hpRouteMu.Lock()
+			hpRouteGood = rt.name
+			hpRouteMu.Unlock()
+		}
 		// The display as the host last said it, in the points the pointer
 		// goes in: for a display of the session's own, the handshake's size
 		// is that of whatever the Mac showed before it.
 		sw, sh, _, _ := sess.Layout()
 		warnf("screen: stream opened (%s, %dx%d)", rt.name, cw, ch)
 		p.status(map[string]any{"s": "live", "w": sw, "h": sh, "cw": cw, "ch": ch,
-			"own": o.Own, "audio": audio, "input": true, "codec": "avc"})
+			"own": own, "audio": audio, "input": true, "codec": codec, "standard": standard})
 		stats := make(chan struct{})
 		go p.stats(sess, stats)
 		err = <-done
@@ -874,7 +1050,7 @@ func hpHello() []byte {
 		name = u.Username
 	}
 	b, _ := json.Marshal(map[string]any{"s": "hello", "v": 3, "name": hpComputerName(), "user": name,
-		"codecs": []string{"avc"}, "signin": true})
+		"codecs": []string{"avc"}, "signin": true, "standard": true, "own": hpOwnHere()})
 	return b
 }
 
@@ -927,7 +1103,7 @@ func screenHPCarry(c net.Conn, p *hpScreen, port int) {
 			if _, err := c.Write(hpWire(f.kind, f.body)); err != nil {
 				return false
 			}
-			p.taken(f.kind)
+			p.taken(f)
 			return true
 		}
 		for {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -564,4 +565,115 @@ func TestScreenHPOwnDisplay(t *testing.T) {
 	}
 	v.w.Close()
 	<-done
+}
+
+// A standard session from the viewer's side: the hello offers it, no video
+// and no sound come, the picture comes whole in pieces of deflated pixels
+// and then where it changed, and the pointer reaches the Mac.
+func TestScreenStandardSession(t *testing.T) {
+	t.Setenv(screenHPEnvVar, "on")
+	hpLoopbackOnly(t)
+	host := hpMock(t, "pw")
+	const w, h = 1280, 720
+	host.Screen = make([]byte, w*h*4)
+	for i := 0; i < w*h; i++ {
+		host.Screen[i*4], host.Screen[i*4+1], host.Screen[i*4+2] = byte(i), byte(i>>8), byte(i>>16)
+	}
+	want := append([]byte(nil), host.Screen...)
+	for i := 3; i < len(want); i += 4 {
+		want[i] = 0xff
+	}
+	v, done := newHPViewer(t, host.Port())
+	if hello := v.status(5 * time.Second); hello["s"] != "hello" || hello["standard"] != true {
+		t.Fatalf("hello %v", hello)
+	}
+	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw", "standard": true, "own": true, "audio": true})
+
+	var fb []byte
+	fw, fh, shown, pieces := 0, 0, 0, 0
+	live := false
+	// take reads frames until ok says so.
+	take := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.After(40 * time.Second)
+		for !ok() {
+			select {
+			case f, open := <-v.frames:
+				if !open {
+					t.Fatalf("the session ended waiting for %s", what)
+				}
+				switch f.kind {
+				case swToStatus:
+					var m map[string]any
+					json.Unmarshal(f.body, &m)
+					switch m["s"] {
+					case "end":
+						t.Fatalf("the session ended: %v", m)
+					case "live":
+						live = true
+						if m["standard"] != true || m["audio"] != false || m["own"] != false || m["codec"] != "pixels" ||
+							m["w"].(float64) != w || m["cw"].(float64) != w || m["ch"].(float64) != h {
+							t.Fatalf("live says %v", m)
+						}
+					}
+				case swToVideoConfig, swToVideoFrame, swToAudio:
+					t.Fatalf("a standard session sent a frame of kind %d", f.kind)
+				case swToLayout:
+					pw, ph := int(binary.BigEndian.Uint16(f.body[4:6])), int(binary.BigEndian.Uint16(f.body[6:8]))
+					if pw != fw || ph != fh {
+						fw, fh, fb = pw, ph, make([]byte, pw*ph*4)
+					}
+				case swToPicture:
+					if len(f.body) < 9 {
+						t.Fatalf("picture frame of %d bytes", len(f.body))
+					}
+					x, y := int(binary.BigEndian.Uint16(f.body[0:2])), int(binary.BigEndian.Uint16(f.body[2:4]))
+					rw, rh := int(binary.BigEndian.Uint16(f.body[4:6])), int(binary.BigEndian.Uint16(f.body[6:8]))
+					if f.body[8]&1 != 0 {
+						shown++
+						continue
+					}
+					pieces++
+					pix, err := io.ReadAll(flate.NewReader(bytes.NewReader(f.body[9:])))
+					if err != nil || len(pix) != rw*rh*4 || x+rw > fw || y+rh > fh {
+						t.Fatalf("piece %dx%d at %d,%d: %d bytes, %v (picture %dx%d)", rw, rh, x, y, len(pix), err, fw, fh)
+					}
+					if len(pix) > hpPictureBand {
+						t.Fatalf("a piece of %d bytes of pixels", len(pix))
+					}
+					for r := 0; r < rh; r++ {
+						copy(fb[((y+r)*fw+x)*4:], pix[r*rw*4:(r+1)*rw*4])
+					}
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s (live %v, shown %d, pieces %d)", what, live, shown, pieces)
+			}
+		}
+	}
+	take("the whole picture", func() bool { return live && shown >= 1 && bytes.Equal(fb, want) })
+	if pieces < 4 {
+		t.Fatalf("the picture came in %d pieces", pieces)
+	}
+	before := shown
+	if err := host.SendPicture(100, 50, 20, 10, bytes.Repeat([]byte{9, 8, 7, 0}, 200)); err != nil {
+		t.Fatal(err)
+	}
+	at := (50*w + 100) * 4
+	take("the rectangle that changed", func() bool { return shown > before && bytes.Equal(fb[at:at+4], []byte{9, 8, 7, 0xff}) })
+	v.send(swFromPointer, []byte{1, 0, 40, 0, 30})
+	waitHP(t, "the pointer", func() bool { p := host.Pointers(); return len(p) == 1 && p[0].X == 40 && p[0].Y == 30 })
+	if offers, _, _ := host.Counts(); offers != 0 {
+		t.Fatalf("a standard session offered media %d times", offers)
+	}
+	v.w.Close()
+	<-done
+}
+
+func TestStandardRoutes(t *testing.T) {
+	got := hpStandardRoutes([]hpRoute{
+		{name: "a", local: "192.168.1.5"}, {name: "a-reuse", local: "192.168.1.5", reusePort: true},
+		{name: "lo", local: "127.0.0.1"}, {name: "lo-reuse", local: "127.0.0.1", reusePort: true}})
+	if len(got) != 2 || got[0].name != "lo" || got[1].name != "a" {
+		t.Fatalf("routes %v", got)
+	}
 }

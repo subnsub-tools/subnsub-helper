@@ -56,6 +56,11 @@ type MockHost struct {
 	// Audio payloads, one every AudioEvery, round and round; none sends none.
 	Audio      [][]byte
 	AudioEvery time.Duration
+	// A standard session's picture (BGRX rows, Width by Height); none is a
+	// picture made up. PixelsBig has the host write its pixels the other way
+	// round (big-endian, red first), as a host whose format has to be read.
+	Screen    []byte
+	PixelsBig bool
 	// Where the viewer's media sockets are; zero is the listener's port and
 	// the one after it, as a viewer that was told nothing else binds.
 	ClientCtrlPort, ClientVideoPort int
@@ -82,6 +87,110 @@ type mockSession struct {
 	cipher *RecordCipher
 	stop   chan struct{}
 	once   sync.Once
+	// A standard session's pictures: one stream of zlib for all of them.
+	zmu sync.Mutex
+	zb  bytes.Buffer
+	zw  *zlib.Writer
+}
+
+// send sends a message of any length, cut into records.
+func (s *mockSession) send(msg []byte) error {
+	const most = 60000
+	for len(msg) > most {
+		if err := s.cipher.EncryptAndSend(s.conn, msg[:most]); err != nil {
+			return err
+		}
+		msg = msg[most:]
+	}
+	return s.cipher.EncryptAndSend(s.conn, msg)
+}
+
+// zlibRect is one rectangle of pixels, deflated on the session's stream.
+func (s *mockSession) zlibRect(x, y, w, h int, pix []byte) []byte {
+	s.zmu.Lock()
+	defer s.zmu.Unlock()
+	if s.zw == nil {
+		s.zw = zlib.NewWriter(&s.zb)
+	}
+	s.zb.Reset()
+	s.zw.Write(pix)
+	s.zw.Flush()
+	r := mockRectHead(x, y, w, h, EncZlib)
+	r = binary.BigEndian.AppendUint32(r, uint32(s.zb.Len()))
+	return append(r, s.zb.Bytes()...)
+}
+
+func mockRectHead(x, y, w, h int, enc int32) []byte {
+	r := make([]byte, 12)
+	binary.BigEndian.PutUint16(r[0:2], uint16(x))
+	binary.BigEndian.PutUint16(r[2:4], uint16(y))
+	binary.BigEndian.PutUint16(r[4:6], uint16(w))
+	binary.BigEndian.PutUint16(r[6:8], uint16(h))
+	binary.BigEndian.PutUint32(r[8:12], uint32(enc))
+	return r
+}
+
+// screen is the standard session's picture, as BGRX.
+func (m *MockHost) screen() []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.Screen) != m.Width*m.Height*4 {
+		m.Screen = make([]byte, m.Width*m.Height*4)
+		for i := 0; i < m.Width*m.Height; i++ {
+			x, y := i%m.Width, i/m.Width
+			m.Screen[i*4], m.Screen[i*4+1], m.Screen[i*4+2] = byte(x), byte(y), byte(x+y)
+		}
+	}
+	return m.Screen
+}
+
+// wirePixels is BGRX pixels as this host writes them.
+func (m *MockHost) wirePixels(bgrx []byte) []byte {
+	if !m.PixelsBig {
+		return bgrx
+	}
+	out := make([]byte, len(bgrx))
+	for i := 0; i+3 < len(bgrx); i += 4 {
+		// Big-endian, red at 16: nothing, red, green, blue.
+		out[i+1], out[i+2], out[i+3] = bgrx[i+2], bgrx[i+1], bgrx[i]
+	}
+	return out
+}
+
+// wholePicture is the update a standard session's arming is answered with:
+// the upper half deflated, a rectangle that says nothing, the lower half raw.
+func (m *MockHost) wholePicture(s *mockSession) []byte {
+	m.screen()
+	m.mu.Lock()
+	w, h := m.Width, m.Height
+	pix := append([]byte(nil), m.Screen...)
+	m.mu.Unlock()
+	top := h / 2
+	u := []byte{0, 0, 0, 3}
+	u = append(u, s.zlibRect(0, 0, w, top, m.wirePixels(pix[:w*top*4]))...)
+	u = append(u, mockRectHead(0, 0, 0, 0, EncApplePointer)...)
+	u = append(u, mockRectHead(0, top, w, h-top, EncRaw)...)
+	return append(u, m.wirePixels(pix[w*top*4:])...)
+}
+
+// SendPicture changes a rectangle of the standard session's picture (BGRX
+// rows) and sends it, deflated.
+func (m *MockHost) SendPicture(x, y, w, h int, bgrx []byte) error {
+	m.mu.Lock()
+	s := m.live
+	m.mu.Unlock()
+	if s == nil {
+		return errors.New("no session")
+	}
+	// Kept, so that a whole picture sent after it shows it too.
+	pix := m.screen()
+	m.mu.Lock()
+	for r := 0; r < h && y+r < m.Height && x+w <= m.Width; r++ {
+		copy(pix[((y+r)*m.Width+x)*4:], bgrx[r*w*4:(r+1)*w*4])
+	}
+	m.mu.Unlock()
+	u := []byte{0, 0, 0, 1}
+	return s.send(append(u, s.zlibRect(x, y, w, h, m.wirePixels(bgrx))...))
 }
 
 func (s *mockSession) end() { s.once.Do(func() { close(s.stop); s.conn.Close() }) }
@@ -232,6 +341,11 @@ func (m *MockHost) serve(conn net.Conn) {
 	var si [24]byte
 	binary.BigEndian.PutUint16(si[0:2], uint16(m.Width))
 	binary.BigEndian.PutUint16(si[2:4], uint16(m.Height))
+	// Four bytes a pixel, blue first as they lie; or the other way round.
+	copy(si[4:20], []byte{32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0})
+	if m.PixelsBig {
+		si[6] = 1
+	}
 	conn.Write(si[:])
 	// The cleartext prelude, up to the encodings.
 	for {
@@ -287,6 +401,9 @@ func (m *MockHost) serve(conn net.Conn) {
 
 	var media chan struct{}
 	offered := false
+	// The encodings last named have no media in them: a standard session,
+	// whose arming is answered with the picture.
+	standard, told := false, false
 	stopMedia := func() {
 		if media != nil {
 			close(media)
@@ -341,10 +458,24 @@ func (m *MockHost) serve(conn net.Conn) {
 				m.mu.Unlock()
 				cipher.EncryptAndSend(conn, m.layoutUpdate())
 			}
+		case MsgClientSetEncodings:
+			standard = true
+			for i := 4; i+4 <= len(msg); i += 4 {
+				if int32(binary.BigEndian.Uint32(msg[i:i+4])) == EncAppleMediaInit {
+					standard = false
+				}
+			}
 		case MsgClientAutoFBUpdate:
 			m.mu.Lock()
 			m.arms++
 			m.mu.Unlock()
+			if standard {
+				if !told {
+					told = true
+					cipher.EncryptAndSend(conn, m.metadata())
+				}
+				s.send(m.wholePicture(s))
+			}
 		case msgClientEncryptedEvent:
 			// As Screen Sharing reads it (stream.go sendEvent): one block
 			// under the record key, a key and the pointer each marked.

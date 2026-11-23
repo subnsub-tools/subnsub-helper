@@ -66,7 +66,11 @@ type Config struct {
 	// second; zero leaves the protocol's own ceilings.
 	MaxBitrate  int
 	SessionMode string // "auto" (default), "share", or "alt"
-	Logf        func(format string, args ...any)
+	// Standard asks for no media: the Mac's display as it is, as rectangles
+	// of pixels on the control stream when they change (ConnectStandard's
+	// session; stream.go Handler.Picture). No UDP socket is bound.
+	Standard bool
+	Logf     func(format string, args ...any)
 }
 
 // DefaultConfig returns sensible defaults for browser-compatible H.264 probing.
@@ -174,7 +178,10 @@ type Session struct {
 
 	rxEncBuf   []byte
 	altSession bool
-	closeOnce  sync.Once
+	// A standard session (Config.Standard), and how the host writes a pixel.
+	standard  bool
+	pixels    PixelFormat
+	closeOnce sync.Once
 	// The session's Run, while there is one (stream.go).
 	runMu sync.Mutex
 	// Held while a display is asked for (Resize, askedDisplay).
@@ -240,6 +247,9 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Standard {
+		return connectStandard(ctx, cfg, destIP)
+	}
 
 	ctrlConn, err := ListenUDP(cfg.UDPBindAddr, cfg.UDPCtrlPort, cfg.ReusePort, defaultUDPRcvBuf)
 	if err != nil {
@@ -291,119 +301,23 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 		punchWG.Wait()
 	}()
 
-	// A caller that gives up (ctx) closes the connection under whatever read
-	// the handshake is in: its reads wait on the host, not on ctx.
-	var held struct {
-		mu sync.Mutex
-		tc *net.TCPConn
-	}
-	hold := func(c *net.TCPConn) {
-		held.mu.Lock()
-		held.tc = c
-		held.mu.Unlock()
-	}
-	stopAbort := context.AfterFunc(ctx, func() {
-		held.mu.Lock()
-		if held.tc != nil {
-			_ = held.tc.SetLinger(0)
-			_ = held.tc.Close()
-		}
-		held.mu.Unlock()
-	})
+	var ab aborter
+	stopAbort := context.AfterFunc(ctx, ab.abort)
 	defer stopAbort()
 
-	tc, br, ecbKey, authUsed, err := connectAndAuth(ctx, cfg, remoteAddr)
+	o, err := signedIn(ctx, &cfg, remoteAddr, HPEncodings, ab.hold)
 	if err != nil {
 		return nil, err
 	}
-	hold(tc)
+	tc, br, cipher, encBuf := o.tc, o.br, o.cipher, o.encBuf
+	srvW, srvH, authUsed, ssDetected, consoleUser, altSession := o.srvW, o.srvH, o.authUsed, o.ssDetected, o.consoleUser, o.altSession
 	cleanupTCP := true
 	defer func() {
-		if cleanupTCP && tc != nil {
+		if cleanupTCP {
 			_ = tc.SetLinger(0)
 			_ = tc.Close()
 		}
 	}()
-
-	srvW, srvH, err := doClientServerInit(tc, br)
-	if err != nil {
-		return nil, err
-	}
-	cfg.logf("auth=%s ServerInit=%dx%d", authUsed, srvW, srvH)
-
-	ssDetected, consoleUser, err := peekSessionSelect(tc, br)
-	if err != nil {
-		return nil, err
-	}
-	altSession := false
-	if ssDetected {
-		cfg.logf("SessionSelect prompt detected (console_user=%q, mode=%s)", consoleUser, cfg.SessionMode)
-		mode := cfg.SessionMode
-		if mode == "auto" {
-			mode = "share"
-		}
-		if mode == "alt" {
-			altSession = true
-			_ = tc.SetLinger(0)
-			_ = tc.Close()
-			tc = nil
-			tc, br, ecbKey, authUsed, err = connectAndAuth(ctx, cfg, remoteAddr)
-			if err != nil {
-				return nil, fmt.Errorf("applehp: alt-session reconnect auth: %w", err)
-			}
-			hold(tc)
-			srvW, srvH, err = doClientServerInit(tc, br)
-			if err != nil {
-				return nil, fmt.Errorf("applehp: alt-session ServerInit: %w", err)
-			}
-			ssDetected2, cu2, err := peekSessionSelect(tc, br)
-			if err != nil {
-				return nil, err
-			}
-			if !ssDetected2 {
-				return nil, errors.New("applehp: alt-session prompt disappeared on second connection")
-			}
-			consoleUser = cu2
-		}
-		if err := handleSessionSelect(tc, br, mode, consoleUser, cfg.Username, cfg.Password, ecbKey); err != nil {
-			return nil, err
-		}
-	}
-
-	// Plaintext prelude.
-	prelude := append(BuildViewerInfo(DefaultViewerOSVer), Apple0x12Followup()...)
-	if _, err := writeFull(tc, prelude); err != nil {
-		return nil, fmt.Errorf("applehp: send ViewerInfo: %w", err)
-	}
-	if err := sleepCtx(ctx, 100*time.Millisecond); err != nil {
-		return nil, err
-	}
-	if cfg.Curtain || altSession {
-		cfg.form = int(hostForm.Load())
-		vd := displayConfig(cfg.Width, cfg.Height, cfg.HiDPIScale, cfg.HDR, cfg.form)
-		if _, err := writeFull(tc, vd); err != nil {
-			return nil, fmt.Errorf("applehp: send VirtualDisplay: %w", err)
-		}
-	}
-	if _, err := writeFull(tc, BuildSetEncodings(HPEncodings)); err != nil {
-		return nil, fmt.Errorf("applehp: send plaintext SetEncodings: %w", err)
-	}
-
-	cipher, encBuf, err := readUntilEnc1103(tc, br, ecbKey)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := writeFull(tc, BuildPostEncryptionToggle()); err != nil {
-		return nil, fmt.Errorf("applehp: send PostEncryptionToggle: %w", err)
-	}
-	if err := sleepCtx(ctx, 200*time.Millisecond); err != nil {
-		return nil, err
-	}
-	encBuf, _, err = drainCipherBuffer(tc, br, cipher, encBuf, 350*time.Millisecond)
-	if err != nil {
-		return nil, err
-	}
-	cfg.logf("enc1103 active")
 
 	// Encrypted phase: SetEncodings + 0x1c offer + FBURequest.
 	videoOffer, audioOffer, videoSSRC, audioSSRC, err := CreateOffers(OfferOptions{
@@ -498,6 +412,197 @@ func Connect(ctx context.Context, cfg Config) (*Session, error) {
 	return sess, nil
 }
 
+// aborter closes the connection a handshake is reading when its caller gives
+// up: the handshake's reads wait on the host, not on a context.
+type aborter struct {
+	mu sync.Mutex
+	tc *net.TCPConn
+}
+
+func (a *aborter) hold(c *net.TCPConn) {
+	a.mu.Lock()
+	a.tc = c
+	a.mu.Unlock()
+}
+
+func (a *aborter) abort() {
+	a.mu.Lock()
+	if a.tc != nil {
+		_ = a.tc.SetLinger(0)
+		_ = a.tc.Close()
+	}
+	a.mu.Unlock()
+}
+
+// signedInConn is a connection signed in and past the rekey, which is where
+// a session of either kind begins.
+type signedInConn struct {
+	tc                     *net.TCPConn
+	br                     *bufio.Reader
+	cipher                 *RecordCipher
+	encBuf                 []byte
+	srvW, srvH             int
+	pixels                 PixelFormat
+	authUsed               string
+	ssDetected, altSession bool
+	consoleUser            string
+}
+
+// signedIn signs in, answers the host's question of which session, sends the
+// cleartext prelude with the encodings given and takes the rekey. hold is
+// told each connection it reads on. cfg.form is set when a display is asked for.
+func signedIn(ctx context.Context, cfgp *Config, remoteAddr string, encodings []int32, hold func(*net.TCPConn)) (o *signedInConn, err error) {
+	cfg := *cfgp
+	tc, br, ecbKey, authUsed, err := connectAndAuth(ctx, cfg, remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+	hold(tc)
+	defer func() {
+		if err != nil && tc != nil {
+			_ = tc.SetLinger(0)
+			_ = tc.Close()
+		}
+	}()
+
+	srvW, srvH, pixels, err := doClientServerInit(tc, br)
+	if err != nil {
+		return nil, err
+	}
+	cfg.logf("auth=%s ServerInit=%dx%d", authUsed, srvW, srvH)
+
+	ssDetected, consoleUser, err := peekSessionSelect(tc, br)
+	if err != nil {
+		return nil, err
+	}
+	altSession := false
+	if ssDetected {
+		cfg.logf("SessionSelect prompt detected (console_user=%q, mode=%s)", consoleUser, cfg.SessionMode)
+		mode := cfg.SessionMode
+		if mode == "auto" {
+			mode = "share"
+		}
+		if mode == "alt" {
+			altSession = true
+			_ = tc.SetLinger(0)
+			_ = tc.Close()
+			tc = nil
+			tc, br, ecbKey, authUsed, err = connectAndAuth(ctx, cfg, remoteAddr)
+			if err != nil {
+				return nil, fmt.Errorf("applehp: alt-session reconnect auth: %w", err)
+			}
+			hold(tc)
+			srvW, srvH, pixels, err = doClientServerInit(tc, br)
+			if err != nil {
+				return nil, fmt.Errorf("applehp: alt-session ServerInit: %w", err)
+			}
+			ssDetected2, cu2, err := peekSessionSelect(tc, br)
+			if err != nil {
+				return nil, err
+			}
+			if !ssDetected2 {
+				return nil, errors.New("applehp: alt-session prompt disappeared on second connection")
+			}
+			consoleUser = cu2
+		}
+		if err := handleSessionSelect(tc, br, mode, consoleUser, cfg.Username, cfg.Password, ecbKey); err != nil {
+			return nil, err
+		}
+	}
+
+	// Plaintext prelude.
+	prelude := append(BuildViewerInfo(DefaultViewerOSVer), Apple0x12Followup()...)
+	if _, err := writeFull(tc, prelude); err != nil {
+		return nil, fmt.Errorf("applehp: send ViewerInfo: %w", err)
+	}
+	if err := sleepCtx(ctx, 100*time.Millisecond); err != nil {
+		return nil, err
+	}
+	if cfg.Curtain || altSession {
+		cfg.form = int(hostForm.Load())
+		cfgp.form = cfg.form
+		vd := displayConfig(cfg.Width, cfg.Height, cfg.HiDPIScale, cfg.HDR, cfg.form)
+		if _, err := writeFull(tc, vd); err != nil {
+			return nil, fmt.Errorf("applehp: send VirtualDisplay: %w", err)
+		}
+	}
+	if _, err := writeFull(tc, BuildSetEncodings(encodings)); err != nil {
+		return nil, fmt.Errorf("applehp: send plaintext SetEncodings: %w", err)
+	}
+
+	cipher, encBuf, err := readUntilEnc1103(tc, br, ecbKey)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writeFull(tc, BuildPostEncryptionToggle()); err != nil {
+		return nil, fmt.Errorf("applehp: send PostEncryptionToggle: %w", err)
+	}
+	if err := sleepCtx(ctx, 200*time.Millisecond); err != nil {
+		return nil, err
+	}
+	encBuf, _, err = drainCipherBuffer(tc, br, cipher, encBuf, 350*time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
+	cfg.logf("enc1103 active")
+	return &signedInConn{tc: tc, br: br, cipher: cipher, encBuf: encBuf, srvW: srvW, srvH: srvH, pixels: pixels,
+		authUsed: authUsed, ssDetected: ssDetected, altSession: altSession, consoleUser: consoleUser}, nil
+}
+
+// connectStandard is Connect for Config.Standard: signed in and past the
+// rekey, with the encodings of a picture sent as pixels and nothing asked for
+// yet. Run asks.
+func connectStandard(ctx context.Context, cfg Config, destIP string) (*Session, error) {
+	remoteAddr := net.JoinHostPort(destIP, fmt.Sprintf("%d", cfg.Port))
+	if cfg.WarmupTCP {
+		if err := WarmupTCP(ctx, cfg.LocalTCPAddr, remoteAddr, cfg.WarmupDwell); err != nil {
+			cfg.logf("warmup TCP warning: %v", err)
+		}
+	}
+	// The Mac's display as it is, with whoever is at it.
+	cfg.Curtain = false
+	cfg.SessionMode = "share"
+	var ab aborter
+	stopAbort := context.AfterFunc(ctx, ab.abort)
+	defer stopAbort()
+	o, err := signedIn(ctx, &cfg, remoteAddr, StandardEncodings, ab.hold)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*Session, error) {
+		_ = o.tc.SetLinger(0)
+		_ = o.tc.Close()
+		return nil, err
+	}
+	if err := o.cipher.EncryptAndSend(o.tc, BuildSetEncodings(StandardEncodings)); err != nil {
+		return fail(fmt.Errorf("applehp: send encrypted SetEncodings: %w", err))
+	}
+	pixels := o.pixels
+	if !pixels.usable() {
+		// Not a format read here: the host is asked for one that is.
+		pixels = pixelsBGRX
+		if err := o.cipher.EncryptAndSend(o.tc, BuildSetPixelFormat(pixels)); err != nil {
+			return fail(fmt.Errorf("applehp: send SetPixelFormat: %w", err))
+		}
+	}
+	cfg.logf("standard session auth=%s ServerInit=%dx%d pixels=%+v", o.authUsed, o.srvW, o.srvH, pixels)
+	return &Session{
+		cfg:                   cfg,
+		destIP:                destIP,
+		tcp:                   o.tc,
+		br:                    o.br,
+		Cipher:                o.cipher,
+		AuthUsed:              o.authUsed,
+		SessionSelectDetected: o.ssDetected,
+		ConsoleUser:           o.consoleUser,
+		ServerW:               o.srvW,
+		ServerH:               o.srvH,
+		rxEncBuf:              o.encBuf,
+		standard:              true,
+		pixels:                pixels,
+	}, nil
+}
+
 func connectAndAuth(ctx context.Context, cfg Config, remoteAddr string) (*net.TCPConn, *bufio.Reader, []byte, string, error) {
 	tryAuth := func(mode string) (*net.TCPConn, *bufio.Reader, []byte, error) {
 		tc, err := DialTCPWithLocal(ctx, cfg.LocalTCPAddr, remoteAddr, 15*time.Second)
@@ -559,29 +664,29 @@ func connectAndAuth(ctx context.Context, cfg Config, remoteAddr string) (*net.TC
 	return tc, br, key, "nonsrp", err2
 }
 
-func doClientServerInit(tc *net.TCPConn, br *bufio.Reader) (int, int, error) {
+func doClientServerInit(tc *net.TCPConn, br *bufio.Reader) (int, int, PixelFormat, error) {
 	_ = tc.SetDeadline(time.Now().Add(15 * time.Second))
 	defer tc.SetDeadline(time.Time{})
 	if _, err := writeFull(tc, []byte{0xc1}); err != nil {
-		return 0, 0, fmt.Errorf("applehp: send ClientInit: %w", err)
+		return 0, 0, PixelFormat{}, fmt.Errorf("applehp: send ClientInit: %w", err)
 	}
 	var head [24]byte
 	if _, err := io.ReadFull(br, head[:]); err != nil {
-		return 0, 0, fmt.Errorf("applehp: read ServerInit: %w", err)
+		return 0, 0, PixelFormat{}, fmt.Errorf("applehp: read ServerInit: %w", err)
 	}
 	nameLen := binary.BigEndian.Uint32(head[20:24])
 	if nameLen > 65536 {
-		return 0, 0, fmt.Errorf("applehp: ServerInit name too long (%d)", nameLen)
+		return 0, 0, PixelFormat{}, fmt.Errorf("applehp: ServerInit name too long (%d)", nameLen)
 	}
 	if nameLen > 0 {
 		discard := make([]byte, nameLen)
 		if _, err := io.ReadFull(br, discard); err != nil {
-			return 0, 0, fmt.Errorf("applehp: read ServerInit name: %w", err)
+			return 0, 0, PixelFormat{}, fmt.Errorf("applehp: read ServerInit name: %w", err)
 		}
 	}
 	w := int(binary.BigEndian.Uint16(head[0:2]))
 	h := int(binary.BigEndian.Uint16(head[2:4]))
-	return w, h, nil
+	return w, h, parsePixelFormat(head[4:20]), nil
 }
 
 func peekSessionSelect(tc *net.TCPConn, br *bufio.Reader) (bool, string, error) {
