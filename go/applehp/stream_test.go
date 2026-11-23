@@ -524,7 +524,7 @@ func TestStandardSession(t *testing.T) {
 		}
 		var mu sync.Mutex
 		var fb []byte
-		fw, fh, ends, sizes, stores := 0, 0, 0, 0, 0
+		fw, fh, ends, sizes, stores, rows := 0, 0, 0, 0, 0, 0
 		h := Handler{
 			PictureSize: func(w, h int) {
 				mu.Lock()
@@ -542,6 +542,7 @@ func TestStandardSession(t *testing.T) {
 				for r := 0; r < h; r++ {
 					copy(fb[((y+r)*fw+x)*4:], pix[r*w*4:(r+1)*w*4])
 				}
+				rows += h
 			},
 			PictureEnd:  func() { mu.Lock(); ends++; mu.Unlock() },
 			CursorStore: func(uint32, int, int, int, int, []byte) { mu.Lock(); stores++; mu.Unlock() },
@@ -578,6 +579,56 @@ func TestStandardSession(t *testing.T) {
 		if st := sess.Stats(); st.Frames < 2 || st.Bytes == 0 {
 			t.Fatalf("stats %+v", st)
 		}
+		// Every picture the armings brought has been read (two rectangles
+		// each), so nothing more comes but what is sent from here.
+		waitFor(t, "the armings' pictures", func() bool { _, arms, _ := host.Counts(); return sess.Stats().Pictures >= 2*arms+1 })
+		// A rectangle sent twice is the viewer's once: the second time it
+		// has it. The whole picture the viewer asks for again is, all of it.
+		twice := bytes.Repeat([]byte{4, 5, 6, 0}, 50)
+		if err := host.SendPicture(7, 9, 10, 5, twice); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the rectangle sent once", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			at := (9*320 + 7) * 4
+			return bytes.Equal(fb[at:at+4], []byte{4, 5, 6, 0xff})
+		})
+		mu.Lock()
+		was := ends
+		mu.Unlock()
+		same, frames := sess.Stats().Same, sess.Stats().Frames
+		if err := host.SendPicture(7, 9, 10, 5, twice); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the rectangle sent again", func() bool { return sess.Stats().Same > same })
+		mu.Lock()
+		if ends != was || sess.Stats().Frames != frames {
+			t.Fatalf("a rectangle the viewer had was passed on: %d updates ended, %d before", ends, was)
+		}
+		rows = 0
+		mu.Unlock()
+		// One row of a rectangle changed: that row alone.
+		again := append([]byte(nil), twice...)
+		copy(again[2*10*4:], bytes.Repeat([]byte{9, 8, 7, 0}, 10))
+		if err := host.SendPicture(7, 9, 10, 5, again); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the row that changed", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			at := (11*320 + 7) * 4
+			return rows == 1 && bytes.Equal(fb[at:at+4], []byte{9, 8, 7, 0xff})
+		})
+		mu.Lock()
+		rows = 0
+		mu.Unlock()
+		sess.RequestKeyframe()
+		waitFor(t, "the whole picture again", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return rows >= 200
+		})
 		mu.Lock()
 		if sizes != 1 {
 			t.Fatalf("the picture's size was said %d times", sizes)

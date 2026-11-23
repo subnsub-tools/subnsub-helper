@@ -53,6 +53,11 @@ const (
 	// cannot be decoded waits before another key frame is asked for.
 	feedbackEvery = time.Second
 	keyAskEvery   = 1500 * time.Millisecond
+	// A standard session asks for what changes next at once while the
+	// picture changes. While the host answers with what the viewer already
+	// has, the asking waits, longer each time, between these two.
+	askIdleMin = 30 * time.Millisecond
+	askIdleMax = 250 * time.Millisecond
 	// One picture, as packets: beyond either it is not a picture, and is
 	// dropped whole.
 	videoFrameMax   = 6 << 20
@@ -93,8 +98,9 @@ type Handler struct {
 type Stats struct {
 	VideoPackets, VideoBad int
 	Frames, Keyframes      int
-	// Rectangles of a standard session's picture handed over.
-	Pictures               int
+	// Rectangles of a standard session's picture that came, and those of
+	// them not handed over: the viewer had their pixels already.
+	Pictures, Same         int
 	FramesLost             int
 	AudioPackets, AudioBad int
 	Bytes                  int64
@@ -133,6 +139,23 @@ type runState struct {
 	picZ       *chunkInflater
 	picErr     error
 	ticks      int
+	// What the viewer has of the picture (BGRA rows, seenW by seenH; a pixel
+	// never sent has nothing in its fourth byte, which no pixel sent has), so
+	// that a rectangle the host sends again as it was is not sent on. Read
+	// and written by the control stream's reader alone. forget: the viewer
+	// asked for the whole picture, and is to get it.
+	seen         []byte
+	seenW, seenH int
+	forget       bool
+	// Of the update being read, the rectangles handed over.
+	passed int
+	// Updates with pixels, those of them with nothing new, and the times the
+	// host was asked for what changes next; how long the next asking waits,
+	// and whether one is waiting.
+	updates, stale, asks int
+	idle                 time.Duration
+	asking               bool
+	asked                time.Time
 }
 
 // Stats returns the counters of the session's current or last Run.
@@ -217,9 +240,14 @@ loop:
 				waiting := rs.stats.Pictures == 0
 				rs.ticks++
 				again := waiting && rs.ticks%2 == 0
+				secs, updates, stale, asks, st := rs.ticks, rs.updates, rs.stale, rs.asks, rs.stats
 				rs.mu.Unlock()
 				if again {
 					_ = s.arm()
+				}
+				if secs == 10 || secs == 60 {
+					s.cfg.logf("standard: %d s: %d updates, %d of them nothing new; %d rectangles, %d not passed on; asked %d times",
+						secs, updates, stale, st.Pictures, st.Same, asks)
 				}
 				continue
 			}
@@ -278,7 +306,15 @@ func (s *Session) arm() error {
 // next report.
 func (s *Session) RequestKeyframe() {
 	if s.standard {
-		// The whole picture again.
+		// The whole picture again, and all of it sent on.
+		s.runMu.Lock()
+		rs := s.run
+		s.runMu.Unlock()
+		if rs != nil {
+			rs.mu.Lock()
+			rs.forget = true
+			rs.mu.Unlock()
+		}
 		_ = s.arm()
 		return
 	}
@@ -331,7 +367,65 @@ func (s *Session) sendEvent(block *[16]byte) error {
 	m[0] = msgClientEncryptedEvent
 	s.eventKey.Encrypt(m[2:], block[:])
 	s.eventMu.Unlock()
-	return s.Cipher.EncryptAndSend(s.tcp, m[:])
+	err := s.Cipher.EncryptAndSend(s.tcp, m[:])
+	if s.standard && err == nil {
+		s.askSoon()
+	}
+	return err
+}
+
+// askSoon ends a standard session's wait between askings: the viewer did
+// something, and what it changes on the display is wanted at once.
+func (s *Session) askSoon() {
+	s.runMu.Lock()
+	rs := s.run
+	s.runMu.Unlock()
+	if rs == nil {
+		return
+	}
+	rs.mu.Lock()
+	// Not for every one of a moving pointer's events.
+	waited := rs.idle > 0 && time.Since(rs.asked) >= askIdleMin
+	if waited {
+		rs.idle = 0
+	}
+	w, h := rs.picW, rs.picH
+	rs.mu.Unlock()
+	if waited {
+		s.askNext(rs, 0, w, h)
+	}
+}
+
+// askNext asks the host for what changes next in a standard session's
+// picture, after wait. One asking waits at a time.
+func (s *Session) askNext(rs *runState, wait time.Duration, w, h int) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	ask := func() {
+		rs.mu.Lock()
+		rs.asks++
+		rs.asked = time.Now()
+		rs.mu.Unlock()
+		_ = s.Cipher.EncryptAndSend(s.tcp, BuildFBURequest(true, 0, 0, uint16(w), uint16(h)))
+	}
+	if wait <= 0 {
+		ask()
+		return
+	}
+	rs.mu.Lock()
+	if rs.asking {
+		rs.mu.Unlock()
+		return
+	}
+	rs.asking = true
+	rs.mu.Unlock()
+	time.AfterFunc(wait, func() {
+		rs.mu.Lock()
+		rs.asking = false
+		rs.mu.Unlock()
+		ask()
+	})
 }
 
 // SendPointer is a pointer event: the buttons held as Screen Sharing counts
@@ -816,27 +910,42 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 	said := ""
 	done := func(st parseStatus) (int, parseStatus) {
 		if st != parseMore {
+			rs.passed = 0
 			for _, e := range evs {
 				e()
 			}
 			if pictures {
+				// An update is the viewer's only where it changes what the
+				// viewer has: a Mac asked for what changes next answers at
+				// once with a rectangle it has sent, some fifty times a second
+				// (seen 2026-11-24, macOS 27 on Apple silicon: 37 by 26 pixels
+				// of its menu bar), and the viewer drew its window as often.
+				fresh := rs.passed > 0
 				rs.mu.Lock()
-				rs.stats.Frames++
-				rs.stats.Bytes += int64(wire)
-				n, pw, ph := rs.stats.Frames, rs.picW, rs.picH
+				rs.updates++
+				if fresh {
+					rs.stats.Frames++
+					rs.stats.Bytes += int64(wire)
+					rs.idle = 0
+				} else {
+					rs.stale++
+					rs.idle = min(max(2*rs.idle, askIdleMin), askIdleMax)
+				}
+				n, wait, pw, ph := rs.updates, rs.idle, rs.picW, rs.picH
 				rs.mu.Unlock()
-				if h.PictureEnd != nil {
+				if fresh && h.PictureEnd != nil {
 					h.PictureEnd()
 				}
 				if n <= 12 {
-					s.cfg.logf("standard: update %d: %s (%d bytes of pixels as sent)", n, said, wire)
+					was := ""
+					if !fresh {
+						was = ", nothing new in it"
+					}
+					s.cfg.logf("standard: update %d: %s (%d bytes of pixels as sent%s)", n, said, wire, was)
 				}
-				// What changes next, asked for as any RFB viewer asks: the host
-				// answers when something has. Its own sending (arm) may bring
-				// the same; a rectangle drawn twice is drawn right.
-				if pw > 0 && ph > 0 {
-					_ = s.Cipher.EncryptAndSend(s.tcp, BuildFBURequest(true, 0, 0, uint16(pw), uint16(ph)))
-				}
+				// What changes next, asked for as any RFB viewer asks. The
+				// host's own sending (arm) may bring the same.
+				s.askNext(rs, wait, pw, ph)
 			}
 		}
 		return pos, st
@@ -1055,7 +1164,7 @@ func (s *Session) onPictureSize(rs *runState, h Handler, w, hh int) {
 }
 
 // onPixels hands over one rectangle of a standard session's picture, as the
-// host wrote its pixels. A rectangle past the picture's edge makes the
+// host wrote its pixels, or as much of it as is not what the viewer has. A rectangle past the picture's edge makes the
 // picture that large: the host said its size in points and draws in pixels.
 func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte) {
 	rs.mu.Lock()
@@ -1068,12 +1177,43 @@ func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte)
 	s.onPictureSize(rs, h, pw, ph)
 	rs.mu.Lock()
 	fits := rs.picErr == nil && x+w <= rs.picW && y+hh <= rs.picH
+	pw, ph = rs.picW, rs.picH
+	forget := rs.forget
+	rs.forget = false
 	if fits {
 		rs.stats.Pictures++
 	}
 	rs.mu.Unlock()
-	if fits && h.Picture != nil {
-		h.Picture(x, y, w, hh, s.pixels.bgra(raw, w*hh))
+	if !fits {
+		return
+	}
+	pix := s.pixels.bgra(raw, w*hh)
+	if rs.seenW != pw || rs.seenH != ph {
+		rs.seen, rs.seenW, rs.seenH = make([]byte, pw*ph*4), pw, ph
+	} else if forget {
+		clear(rs.seen)
+	}
+	// The rows between the first and the last that are not what the viewer has.
+	had := func(r int) []byte { at := ((y+r)*pw + x) * 4; return rs.seen[at : at+w*4] }
+	top, end := 0, hh
+	for top < end && bytes.Equal(had(top), pix[top*w*4:(top+1)*w*4]) {
+		top++
+	}
+	for end > top && bytes.Equal(had(end-1), pix[(end-1)*w*4:end*w*4]) {
+		end--
+	}
+	if top == end {
+		rs.mu.Lock()
+		rs.stats.Same++
+		rs.mu.Unlock()
+		return
+	}
+	for r := top; r < end; r++ {
+		copy(had(r), pix[r*w*4:(r+1)*w*4])
+	}
+	rs.passed++
+	if h.Picture != nil {
+		h.Picture(x, y+top, w, end-top, pix[top*w*4:end*w*4])
 	}
 }
 
