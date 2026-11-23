@@ -132,6 +132,7 @@ type runState struct {
 	picW, picH int
 	picZ       *chunkInflater
 	picErr     error
+	ticks      int
 }
 
 // Stats returns the counters of the session's current or last Run.
@@ -211,6 +212,15 @@ loop:
 			break loop
 		case <-tick.C:
 			if s.standard {
+				// No picture yet: asked for again, every other second.
+				rs.mu.Lock()
+				waiting := rs.stats.Pictures == 0
+				rs.ticks++
+				again := waiting && rs.ticks%2 == 0
+				rs.mu.Unlock()
+				if again {
+					_ = s.arm()
+				}
 				continue
 			}
 			var fir *uint32
@@ -241,16 +251,27 @@ loop:
 // arm sends the pair that keeps the host's cursor and layout messages
 // coming: server-driven updates, and one whole-screen request.
 func (s *Session) arm() error {
+	// A High Performance session asks for everything there could be: its
+	// picture comes another way. A standard session names the display's own
+	// size, as Screen Sharing's viewer does: asked for 65535 by 65535, a Mac
+	// answers with two pixels by two of black and nothing after (seen
+	// 2026-11-24, macOS 15 on Intel and macOS 27 on Apple silicon).
+	w, h := 0xffff, 0xffff
+	if s.standard {
+		if sw, sh, _, _ := s.Layout(); sw > 0 && sh > 0 {
+			w, h = sw, sh
+		}
+	}
 	var m [16]byte
 	m[0] = MsgClientAutoFBUpdate
 	binary.BigEndian.PutUint16(m[2:4], 1)
 	binary.BigEndian.PutUint32(m[4:8], 0xffffffff)
-	binary.BigEndian.PutUint16(m[12:14], 0xffff)
-	binary.BigEndian.PutUint16(m[14:16], 0xffff)
+	binary.BigEndian.PutUint16(m[12:14], uint16(w))
+	binary.BigEndian.PutUint16(m[14:16], uint16(h))
 	if err := s.Cipher.EncryptAndSend(s.tcp, m[:]); err != nil {
 		return err
 	}
-	return s.Cipher.EncryptAndSend(s.tcp, BuildFBURequest(false, 0, 0, 0xffff, 0xffff))
+	return s.Cipher.EncryptAndSend(s.tcp, BuildFBURequest(false, 0, 0, uint16(w), uint16(h)))
 }
 
 // RequestKeyframe asks the host for a picture that needs no other, at the
@@ -791,6 +812,8 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 	var evs []pendingEvent
 	// The bytes of the update's pixels as they came, and whether it had any.
 	pictures, wire := false, 0
+	// The update's rectangles in a few words, for the first updates' log lines.
+	said := ""
 	done := func(st parseStatus) (int, parseStatus) {
 		if st != parseMore {
 			for _, e := range evs {
@@ -800,9 +823,19 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 				rs.mu.Lock()
 				rs.stats.Frames++
 				rs.stats.Bytes += int64(wire)
+				n, pw, ph := rs.stats.Frames, rs.picW, rs.picH
 				rs.mu.Unlock()
 				if h.PictureEnd != nil {
 					h.PictureEnd()
+				}
+				if n <= 12 {
+					s.cfg.logf("standard: update %d: %s (%d bytes of pixels as sent)", n, said, wire)
+				}
+				// What changes next, asked for as any RFB viewer asks: the host
+				// answers when something has. Its own sending (arm) may bring
+				// the same; a rectangle drawn twice is drawn right.
+				if pw > 0 && ph > 0 {
+					_ = s.Cipher.EncryptAndSend(s.tcp, BuildFBURequest(true, 0, 0, uint16(pw), uint16(ph)))
 				}
 			}
 		}
@@ -828,6 +861,9 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 			return n, p+n <= len(b)
 		}
 		if s.standard {
+			if i < 6 {
+				said += fmt.Sprintf("[enc %d %dx%d at %d,%d]", enc, w, hh, x, y)
+			}
 			// The picture, and the rectangles that say something of it.
 			taken := true
 			switch enc {

@@ -474,7 +474,16 @@ func (m *MockHost) serve(conn net.Conn) {
 					told = true
 					cipher.EncryptAndSend(conn, m.metadata())
 				}
-				s.send(m.wholePicture(s))
+				// As a Mac does: the picture for the display's own size, and
+				// for any other two pixels by two of black.
+				m.mu.Lock()
+				own := len(msg) >= 16 && int(binary.BigEndian.Uint16(msg[12:14])) == m.Width && int(binary.BigEndian.Uint16(msg[14:16])) == m.Height
+				m.mu.Unlock()
+				if own {
+					s.send(m.wholePicture(s))
+				} else {
+					s.send(append([]byte{0, 0, 0, 1}, s.zlibRect(0, 0, 2, 2, make([]byte, 16))...))
+				}
 			}
 		case msgClientEncryptedEvent:
 			// As Screen Sharing reads it (stream.go sendEvent): one block

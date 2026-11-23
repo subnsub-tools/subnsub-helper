@@ -77,6 +77,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -660,8 +661,18 @@ func (p *hpScreen) run(o hpCommand, port int) {
 	base.MaxBitrate = kbps * 1000
 	base.Standard = standard
 	if standard {
-		// What a standard session could not read is worth a line in the log.
-		base.Logf = func(format string, args ...any) { warnf("screen: "+format, args...) }
+		// What a standard session says of itself is worth a line in the log,
+		// and the viewer is told the first of it: the log is on this Mac, and
+		// the one who wants to know is at the other.
+		var notes atomic.Int32
+		base.Logf = func(format string, args ...any) {
+			warnf("screen: "+format, args...)
+			if notes.Add(1) <= 40 {
+				if b, err := json.Marshal(map[string]any{"s": "note", "text": fmt.Sprintf(format, args...)}); err == nil {
+					p.push(swToStatus, b)
+				}
+			}
+		}
 	}
 	if own && o.W >= 320 && o.H >= 200 && o.W <= 7680 && o.H <= 4320 {
 		base.Width, base.Height = o.W, o.H
