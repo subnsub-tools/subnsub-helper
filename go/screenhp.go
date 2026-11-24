@@ -45,13 +45,15 @@ package main
 //	                9 picture (a standard session): x y w h u16 (pixels),
 //	                  flags, then the rectangle's BGRA rows, deflated (no
 //	                  zlib header); with flag 2, the rectangle as a JPEG
-//	                  instead (only to a viewer whose open said jpeg).
+//	                  instead (only to a viewer whose open said jpeg), of
+//	                  the rectangle's size or, to a viewer whose open said
+//	                  scaled, smaller: the viewer draws it over the whole.
 //	                  Flag 1 = the update is whole: show it. That one has
 //	                  no rectangle, and to a viewer that said jpeg its x
 //	                  and y are the update's number, high half and low
 //	                  (never zero), which the viewer says back
 //	from the viewer 1 control (JSON): open {codecs, audio, kbps, user,
-//	                  password, own, standard, jpeg, w, h, scale}, size {w
+//	                  password, own, standard, jpeg, scaled, w, h, scale}, size {w
 //	                  h scale}, kbps, mode {observe} (told to the Mac, as
 //	                  its own viewer does), key, clip {text} (any text;
 //	                  status clip {ok: false} when it did not go: too long
@@ -77,13 +79,18 @@ package main
 // Screen Sharing is asked for exact pixels as before: it is on this machine,
 // and what its own Adaptive Quality saves is saved on the way to a viewer,
 // which here is the way from this helper. So the adapting is done here. A
-// large rectangle goes as a JPEG, at a quality that follows how long the
-// viewer takes to show an update; the Mac is asked for what changed next
-// only once the viewer says it has shown the last, so the Mac sends what
-// the display has become and not each state it went through; and where the
-// display has rested a quarter of a second, the viewer is sent the same
-// pixels exact. A small rectangle (a letter typed, the insertion point) is
-// exact from the start.
+// large rectangle goes as a JPEG, of a quality and, for a viewer whose open
+// also said scaled, a size (whole, a half or a quarter a side) that follow
+// how much longer the viewer takes to show a large update than a small one
+// (seen 2026-11-24 with whole-size JPEGs alone, to a Mac 117 ms and some
+// 300 KB a second away: two or three pictures a second). The Mac is asked
+// for what changed next only while fewer than hpShownAhead updates are still
+// on their way to the viewer's screen, so the Mac sends what the display has
+// become and not each state it went through. Where the display has rested a
+// quarter of a second, the viewer is sent the place again as a whole-size
+// JPEG of good quality if what it has is less, and a quarter of a second
+// after that the same pixels exact. A small rectangle (a letter typed, the
+// insertion point) is exact from the start.
 //
 // own asks for a display of the session's own, which takes the size asked
 // for and follows the viewer's window (Dynamic resolution); the Mac's own
@@ -217,23 +224,36 @@ type hpScreen struct {
 	// of the picture is made and queued at a time, the Mac's own and the
 	// exact ones that follow a JPEG alike, and everything from here to
 	// updSoftBytes is touched with it held. tiles: when each tile last went
-	// as a JPEG (0: the viewer has it exact), tilesW across and tilesH down
-	// a picture of tilesPicW by tilesPicH; soft counts those not 0.
-	adaptive             bool
+	// as a JPEG (0: the viewer has it exact) and tileKind what kind of JPEG
+	// it has (hpTileGood, hpTileRough), tilesW across and tilesH down a
+	// picture of tilesPicW by tilesPicH; soft counts those not 0. scaled:
+	// the viewer draws a JPEG smaller than its rectangle over the whole.
+	adaptive, scaled     bool
 	picMu                sync.Mutex
 	tiles                []int64
+	tileKind             []uint8
 	tilesW, tilesH       int
 	tilesPicW, tilesPicH int
 	soft                 int
-	quality              int
-	// Of the update being sent: whether any of it went as a JPEG, and how
-	// many bytes those were.
-	updSoft      bool
+	// Of the update being sent: how many bytes of it went as JPEGs.
 	updSoftBytes int
-	// The number of the last update sent whole and the last the viewer said
-	// it has shown (both with mu), and a word each time it says so.
+	// With mu, from here. The number of the last update sent whole and the
+	// last the viewer said it has shown, and a word each time it says so.
 	serial, shown uint32
 	shownCame     chan struct{}
+	// The rung in use and when it last changed; of the last updates sent,
+	// by their numbers, when each went and how many bytes of JPEG it had;
+	// how long the viewer took to show an update at the least, lately (two
+	// spans of hpBaseEvery) and for the last one; and what went to the
+	// viewer in all.
+	rung               int
+	rungAt             time.Time
+	sentAt             [64]time.Time
+	sentSoft           [64]int
+	baseNow, baseWas   time.Duration
+	baseFrom           time.Time
+	tookLast           time.Duration
+	picSent, picWholes int64
 	// Ends with the session on the route being tried: what a session that
 	// is being let go still has to say is not waited for.
 	route context.Context
@@ -260,7 +280,7 @@ type hpSize struct {
 func newHPScreen() *hpScreen {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &hpScreen{out: make(chan hpFrame, hpQueueLen), ctx: ctx, stop: cancel, done: make(chan struct{}), scale: 1,
-		quality: hpQualityFirst, shownCame: make(chan struct{}, 1)}
+		rung: hpRungFirst, shownCame: make(chan struct{}, 1)}
 }
 
 // push queues a frame for the viewer; false when there was no room.
@@ -478,11 +498,19 @@ func (p *hpScreen) handler() applehp.Handler {
 				}
 				return
 			}
-			// As JPEGs, made side by side: a whole display is several.
-			rows = max(hpSoftRows, rows/hpSoftRows*hpSoftRows)
+			// As JPEGs, made side by side: a whole display is several. One
+			// made smaller holds as many pixels of its own as a whole one.
+			p.mu.Lock()
+			rung := hpRungs[p.rung]
+			p.mu.Unlock()
+			block := hpSoftRows * rung.scale
+			rows = max(block, rows*rung.scale*rung.scale/block*block)
 			bands := (h + rows - 1) / rows
 			made := make([][]byte, bands)
-			quality := p.quality
+			kind := uint8(hpTileGood)
+			if rung.scale > 1 || rung.quality < hpQualityGood-10 {
+				kind = hpTileRough
+			}
 			var wg sync.WaitGroup
 			room := make(chan struct{}, hpEncoders())
 			for i := 0; i < bands; i++ {
@@ -493,7 +521,7 @@ func (p *hpScreen) handler() applehp.Handler {
 				go func() {
 					defer wg.Done()
 					defer func() { <-room }()
-					made[i] = hpJPEG(bgra[top*w*4:(top+n)*w*4], w, n, quality)
+					made[i] = hpJPEG(bgra[top*w*4:(top+n)*w*4], w, n, rung.scale, rung.quality)
 				}()
 			}
 			wg.Wait()
@@ -505,19 +533,17 @@ func (p *hpScreen) handler() applehp.Handler {
 					continue
 				}
 				p.pushPiece(x, y+top, w, n, hpPieceJPEG, made[i])
-				p.wentSoft(x, y+top, w, n)
-				p.updSoft = true
+				p.wentSoft(x, y+top, w, n, kind)
 				p.updSoftBytes += len(made[i])
 			}
 		},
 		PictureEnd: func() {
 			p.picMu.Lock()
-			serial := p.pushWhole()
-			soft, sent := p.updSoft, p.updSoftBytes
-			p.updSoft, p.updSoftBytes = false, 0
+			serial := p.pushWhole(p.updSoftBytes)
+			p.updSoftBytes = 0
 			p.picMu.Unlock()
 			if serial != 0 {
-				p.awaitShown(serial, soft, sent)
+				p.awaitShown(serial)
 			}
 		},
 	}
@@ -525,28 +551,37 @@ func (p *hpScreen) handler() applehp.Handler {
 
 const (
 	// An adaptive session (jpeg in open). A rectangle of fewer pixels than
-	// hpSoftMin goes exact; a larger one as JPEGs, of whole blocks of rows.
-	// The quality starts at hpQualityFirst, goes down when the viewer took
-	// longer than hpSoftSlow to show an update, and up when a sizable one
-	// took less than hpSoftFast. An update the viewer has not said it has
-	// shown after hpShownWait is no longer waited for.
-	hpSoftMin      = 128 * 128
-	hpSoftRows     = 16
-	hpQualityFirst = 70
-	hpQualityMin   = 30
-	hpQualityMax   = 85
-	hpSoftSlow     = 150 * time.Millisecond
-	hpSoftFast     = 50 * time.Millisecond
-	hpSoftSizable  = 32 << 10
-	hpShownWait    = time.Second
+	// hpSoftMin goes exact; a larger one as JPEGs, of whole blocks of rows,
+	// as the rung in use says (hpRungs). The rung is one less good when the
+	// viewer took hpSoftSlow longer to show an update than it takes to show
+	// a small one, and one better when a sizable update took less than
+	// hpSoftFast longer, hpRungEvery apart at the least. The Mac is asked
+	// for what changed next while fewer than hpShownAhead updates are on
+	// their way, and after hpShownWait whatever is.
+	hpSoftMin     = 128 * 128
+	hpSoftRows    = 16
+	hpRungFirst   = 1
+	hpRungWhole   = 3
+	hpSoftSlow    = 100 * time.Millisecond
+	hpSoftFast    = 30 * time.Millisecond
+	hpSoftSizable = 16 << 10
+	hpRungEvery   = 200 * time.Millisecond
+	hpShownAhead  = 3
+	hpShownWait   = time.Second
+	hpBaseEvery   = 3 * time.Second
 	// What went as JPEG is remembered in tiles of hpSoftTile pixels a side.
-	// A tile is sent exact once nothing of it changed for hpSoftSettle, a
-	// few at a time (hpSoftEvery apart, and only while the viewer has shown
-	// all it was sent): at most this many bytes of pixels a time, by the
-	// quality the way allows.
+	// A tile that has not changed for hpSoftSettle is sent again, a few at
+	// a time (hpSoftEvery apart, and only while the viewer has shown all it
+	// was sent): one whose JPEG was small or poor (hpTileRough) as a
+	// whole-size JPEG of hpQualityGood, and one that has such a JPEG
+	// (hpTileGood) exact. At most this many bytes of pixels a time, by the
+	// rung the way allows.
 	hpSoftTile    = 64
 	hpSoftSettle  = 250 * time.Millisecond
 	hpSoftEvery   = 50 * time.Millisecond
+	hpQualityGood = 75
+	hpTileGood    = 1
+	hpTileRough   = 2
 	hpSharpenFast = 4 << 20
 	hpSharpenMid  = 1 << 20
 	hpSharpenSlow = 256 << 10
@@ -555,38 +590,66 @@ const (
 	hpPieceJPEG  = 2
 )
 
+// hpRungs is how a large rectangle goes while the display changes, from the
+// best to the least: how many pixels a side become one, and the JPEG's
+// quality. Those past hpRungWhole are for a viewer whose open said scaled.
+var hpRungs = []struct{ scale, quality int }{
+	{1, 85}, {1, 70}, {1, 55}, {1, 40}, {2, 55}, {2, 40}, {4, 45}, {4, 30},
+}
+
 // hpEncoders is how many JPEGs are made at once: this Mac has other work.
 func hpEncoders() int { return min(max(runtime.NumCPU()/2, 1), 4) }
 
 var hpJPEGRoom = sync.Pool{New: func() any { return new([]byte) }}
 
-// hpJPEG is BGRA rows as a JPEG, or nil.
-func hpJPEG(bgra []byte, w, h, quality int) []byte {
-	n := w * h * 4
-	if w <= 0 || h <= 0 || len(bgra) < n {
+// hpJPEG is BGRA rows as a JPEG, or nil: of their own size, or with scale
+// pixels a side made one (the last of a row or a column of what there is).
+func hpJPEG(bgra []byte, w, h, scale, quality int) []byte {
+	if w <= 0 || h <= 0 || scale <= 0 || len(bgra) < w*h*4 {
 		return nil
 	}
+	dw, dh := (w+scale-1)/scale, (h+scale-1)/scale
+	n := dw * dh * 4
 	room := hpJPEGRoom.Get().(*[]byte)
 	defer hpJPEGRoom.Put(room)
 	if cap(*room) < n {
 		*room = make([]byte, n)
 	}
 	rgba := (*room)[:n]
-	for i := 0; i < n; i += 4 {
-		rgba[i], rgba[i+1], rgba[i+2], rgba[i+3] = bgra[i+2], bgra[i+1], bgra[i], 0xff
+	if scale == 1 {
+		for i := 0; i < n; i += 4 {
+			rgba[i], rgba[i+1], rgba[i+2], rgba[i+3] = bgra[i+2], bgra[i+1], bgra[i], 0xff
+		}
+	} else {
+		for dy := 0; dy < dh; dy++ {
+			y0, y1 := dy*scale, min((dy+1)*scale, h)
+			for dx := 0; dx < dw; dx++ {
+				x0, x1 := dx*scale, min((dx+1)*scale, w)
+				var b, g, r int
+				for y := y0; y < y1; y++ {
+					row := bgra[(y*w+x0)*4 : (y*w+x1)*4]
+					for i := 0; i < len(row); i += 4 {
+						b, g, r = b+int(row[i]), g+int(row[i+1]), r+int(row[i+2])
+					}
+				}
+				of := (x1 - x0) * (y1 - y0)
+				at := (dy*dw + dx) * 4
+				rgba[at], rgba[at+1], rgba[at+2], rgba[at+3] = byte(r/of), byte(g/of), byte(b/of), 0xff
+			}
+		}
 	}
 	var b bytes.Buffer
-	b.Grow(n / 16)
-	img := &image.RGBA{Pix: rgba, Stride: w * 4, Rect: image.Rect(0, 0, w, h)}
+	b.Grow(n/16 + 1024)
+	img := &image.RGBA{Pix: rgba, Stride: dw * 4, Rect: image.Rect(0, 0, dw, dh)}
 	if jpeg.Encode(&b, img, &jpeg.Options{Quality: quality}) != nil {
 		return nil
 	}
 	return b.Bytes()
 }
 
-// wentSoft remembers that the viewer has a rectangle as a JPEG, and since
-// when. Called with picMu held.
-func (p *hpScreen) wentSoft(x, y, w, h int) {
+// wentSoft remembers that the viewer has a rectangle as a JPEG of this kind,
+// and since when. Called with picMu held.
+func (p *hpScreen) wentSoft(x, y, w, h int, kind uint8) {
 	p.mu.Lock()
 	pw, ph := p.picW, p.picH
 	p.mu.Unlock()
@@ -597,6 +660,7 @@ func (p *hpScreen) wentSoft(x, y, w, h int) {
 		p.tilesPicW, p.tilesPicH = pw, ph
 		p.tilesW, p.tilesH = (pw+hpSoftTile-1)/hpSoftTile, (ph+hpSoftTile-1)/hpSoftTile
 		p.tiles = make([]int64, p.tilesW*p.tilesH)
+		p.tileKind = make([]uint8, p.tilesW*p.tilesH)
 		p.soft = 0
 	}
 	now := time.Now().UnixNano()
@@ -606,56 +670,98 @@ func (p *hpScreen) wentSoft(x, y, w, h int) {
 				p.soft++
 			}
 			p.tiles[ty*p.tilesW+tx] = now
+			p.tileKind[ty*p.tilesW+tx] = kind
 		}
 	}
 }
 
-// awaitShown waits for the viewer to say it has shown the update of this
-// number, so that the Mac is asked for what changed next no sooner: what it
-// then sends is the display as it is by then. How long the viewer took sets
-// the quality of the JPEGs that follow.
-func (p *hpScreen) awaitShown(serial uint32, soft bool, sent int) {
+// awaitShown waits, after the update of this number went, until fewer than
+// hpShownAhead updates are still on their way to the viewer's screen, so
+// that the Mac is asked for what changed next no sooner: what it then sends
+// is the display as it is by then. More than one on the way keeps the
+// pictures coming where the viewer's word takes long to come back.
+func (p *hpScreen) awaitShown(serial uint32) {
 	p.mu.Lock()
 	ctx := p.route
 	p.mu.Unlock()
 	if ctx == nil {
 		ctx = p.ctx
 	}
-	from := time.Now()
 	late := time.NewTimer(hpShownWait)
 	defer late.Stop()
-	shown := false
-wait:
 	for {
 		p.mu.Lock()
-		shown = p.shown >= serial
+		ahead := p.shown >= serial || serial-p.shown < hpShownAhead
 		p.mu.Unlock()
-		if shown {
-			break
+		if ahead {
+			return
 		}
 		select {
 		case <-p.shownCame:
 		case <-late.C:
-			break wait
+			// Nothing came back in all that time: less is sent.
+			p.mu.Lock()
+			p.slower(time.Now())
+			p.mu.Unlock()
+			return
 		case <-ctx.Done():
 			return
 		}
 	}
-	if !soft {
-		return
-	}
-	took := time.Since(from)
-	p.picMu.Lock()
-	switch {
-	case !shown || took > hpSoftSlow:
-		p.quality = max(p.quality-10, hpQualityMin)
-	case took < hpSoftFast && sent >= hpSoftSizable:
-		p.quality = min(p.quality+5, hpQualityMax)
-	}
-	p.picMu.Unlock()
 }
 
-// sharpen sends the viewer exact what it has as JPEGs, where the display
+// wasShown is the viewer saying the update of this number is on its screen.
+// How long that took, past what a small update takes, moves the rung.
+func (p *hpScreen) wasShown(n uint32) {
+	now := time.Now()
+	p.mu.Lock()
+	if n > p.shown && n <= p.serial {
+		p.shown = n
+		if at := p.sentAt[n%uint32(len(p.sentAt))]; !at.IsZero() {
+			took := now.Sub(at)
+			p.tookLast = took
+			if now.Sub(p.baseFrom) > hpBaseEvery {
+				p.baseWas, p.baseNow, p.baseFrom = p.baseNow, 0, now
+			}
+			if p.baseNow == 0 || took < p.baseNow {
+				p.baseNow = took
+			}
+			base := p.baseNow
+			if p.baseWas > 0 && p.baseWas < base {
+				base = p.baseWas
+			}
+			if soft := p.sentSoft[n%uint32(len(p.sentSoft))]; soft > 0 && now.Sub(p.rungAt) >= hpRungEvery {
+				switch {
+				case took-base > hpSoftSlow:
+					p.slower(now)
+				case took-base < hpSoftFast && soft >= hpSoftSizable && p.rung > 0:
+					p.rung--
+					p.rungAt = now
+				}
+			}
+		}
+	}
+	p.mu.Unlock()
+	select {
+	case p.shownCame <- struct{}{}:
+	default:
+	}
+}
+
+// slower takes the next rung down, as far as the viewer reads. Called with
+// mu held.
+func (p *hpScreen) slower(now time.Time) {
+	last := len(hpRungs) - 1
+	if !p.scaled {
+		last = hpRungWhole
+	}
+	if p.rung < last {
+		p.rung++
+		p.rungAt = now
+	}
+}
+
+// sharpen sends the viewer better what it has as JPEGs, where the display
 // has rested, until done.
 func (p *hpScreen) sharpen(sess *applehp.Session, done <-chan struct{}) {
 	t := time.NewTicker(hpSoftEvery)
@@ -683,40 +789,60 @@ func (p *hpScreen) sharpenSome(sess *applehp.Session) {
 	}
 	p.mu.Lock()
 	caughtUp := p.picAhead == 0 && p.shown == p.serial
+	rung := p.rung
 	p.mu.Unlock()
 	if !caughtUp {
 		return
 	}
 	room := hpSharpenSlow
 	switch {
-	case p.quality >= hpQualityFirst:
+	case rung <= hpRungFirst:
 		room = hpSharpenFast
-	case p.quality >= 50:
+	case rung <= hpRungWhole:
 		room = hpSharpenMid
 	}
 	now := time.Now().UnixNano()
-	due := func(tx, ty int) bool {
+	due := func(tx, ty int, kind uint8) bool {
 		t := p.tiles[ty*p.tilesW+tx]
-		return t != 0 && now-t >= int64(hpSoftSettle)
+		return t != 0 && p.tileKind[ty*p.tilesW+tx] == kind && now-t >= int64(hpSoftSettle)
 	}
 	sent := false
 	for ty := 0; ty < p.tilesH && room > 0; ty++ {
 		for tx := 0; tx < p.tilesW && room > 0; {
-			if !due(tx, ty) {
+			kind := p.tileKind[ty*p.tilesW+tx]
+			if !due(tx, ty, kind) {
 				tx++
 				continue
 			}
-			// The tiles due side by side, as one rectangle.
+			// The tiles due side by side, and of a kind, as one rectangle.
 			first := tx
-			for tx < p.tilesW && due(tx, ty) {
-				p.tiles[ty*p.tilesW+tx] = 0
-				p.soft--
+			for tx < p.tilesW && due(tx, ty, kind) {
 				tx++
 			}
 			x, y := first*hpSoftTile, ty*hpSoftTile
 			w, h := min(tx*hpSoftTile, p.tilesPicW)-x, min((ty+1)*hpSoftTile, p.tilesPicH)-y
 			// Nil: the picture is no longer that size, and comes whole again.
-			if pix := sess.Seen(x, y, w, h); pix != nil {
+			pix := sess.Seen(x, y, w, h)
+			var good []byte
+			if pix != nil && kind == hpTileRough {
+				good = hpJPEG(pix, w, h, 1, hpQualityGood)
+			}
+			for i := first; i < tx; i++ {
+				if good != nil {
+					p.tiles[ty*p.tilesW+i], p.tileKind[ty*p.tilesW+i] = now, hpTileGood
+				} else {
+					p.tiles[ty*p.tilesW+i], p.tileKind[ty*p.tilesW+i] = 0, 0
+					p.soft--
+				}
+			}
+			switch {
+			case pix == nil:
+			case good != nil:
+				// A JPEG takes a small part of what the same pixels take exact.
+				p.pushPiece(x, y, w, h, hpPieceJPEG, good)
+				room -= len(pix) / 8
+				sent = true
+			default:
 				p.pushPicture(x, y, w, h, 0, pix)
 				room -= len(pix)
 				sent = true
@@ -724,15 +850,17 @@ func (p *hpScreen) sharpenSome(sess *applehp.Session) {
 		}
 	}
 	if sent {
-		p.pushWhole()
+		// Not counted as JPEG: how long these take says nothing of what
+		// the way carries while the display changes.
+		p.pushWhole(0)
 	}
 }
 
 // pushWhole queues the word that an update is whole. To an adaptive
 // session's viewer it carries the update's number, which is returned: the
-// viewer says it back once the update is on its screen. Called with picMu
-// held.
-func (p *hpScreen) pushWhole() uint32 {
+// viewer says it back once the update is on its screen. soft: how many
+// bytes of the update were JPEGs. Called with picMu held.
+func (p *hpScreen) pushWhole(soft int) uint32 {
 	if !p.adaptive {
 		p.pushPicture(0, 0, 0, 0, hpPieceWhole, nil)
 		return 0
@@ -743,6 +871,9 @@ func (p *hpScreen) pushWhole() uint32 {
 		p.serial = 1
 	}
 	serial := p.serial
+	p.sentAt[serial%uint32(len(p.sentAt))] = time.Now()
+	p.sentSoft[serial%uint32(len(p.sentSoft))] = soft
+	p.picWholes++
 	p.mu.Unlock()
 	p.pushPiece(int(serial>>16), int(serial&0xffff), 0, 0, hpPieceWhole, nil)
 	return serial
@@ -793,6 +924,7 @@ func (p *hpScreen) pushPiece(x, y, w, h int, flags byte, pixels []byte) {
 		room := p.picAhead < hpPictureAhead
 		if room {
 			p.picAhead += len(body)
+			p.picSent += int64(len(body))
 		}
 		p.mu.Unlock()
 		if room {
@@ -840,6 +972,7 @@ type hpCommand struct {
 	Own      bool     `json:"own"`
 	Standard bool     `json:"standard"`
 	JPEG     bool     `json:"jpeg"`
+	Scaled   bool     `json:"scaled"`
 	N        uint32   `json:"n"`
 	W        int      `json:"w"`
 	H        int      `json:"h"`
@@ -1009,7 +1142,7 @@ func (p *hpScreen) run(o hpCommand, port int) {
 	p.mu.Unlock()
 	// Before any session's pictures: its reader finds it set.
 	p.picMu.Lock()
-	p.adaptive = standard && o.JPEG
+	p.adaptive, p.scaled = standard && o.JPEG, standard && o.JPEG && o.Scaled
 	p.picMu.Unlock()
 	p.status(map[string]any{"s": "connecting"})
 	why := "failed"
@@ -1150,7 +1283,7 @@ func (p *hpScreen) run(o hpCommand, port int) {
 			"own": own, "audio": audio, "input": true, "codec": codec, "standard": standard,
 			"adaptive": standard && o.JPEG})
 		stats := make(chan struct{})
-		go p.stats(sess, stats)
+		go p.stats(sess, stats, standard && o.JPEG)
 		if standard && o.JPEG {
 			go p.sharpen(sess, stats)
 		}
@@ -1173,12 +1306,16 @@ func (p *hpScreen) run(o hpCommand, port int) {
 // stats tells the viewer what the stream did, every two seconds, until done:
 // pictures and kilobits a second, what was lost, key frames, packets that did
 // not authenticate, sound packets a second, pictures not sent because the
-// viewer was behind, and key frames asked for.
-func (p *hpScreen) stats(sess *applehp.Session, done <-chan struct{}) {
+// viewer was behind, and key frames asked for. Of an adaptive session, the
+// pictures and kilobits are those that went to the viewer, and while any
+// do, a note says how they went.
+func (p *hpScreen) stats(sess *applehp.Session, done <-chan struct{}, adaptive bool) {
 	const every = 2 * time.Second
 	t := time.NewTicker(every)
 	defer t.Stop()
 	last := sess.Stats()
+	var lastSent, lastWholes int64
+	notes := 0
 	for {
 		select {
 		case <-done:
@@ -1190,11 +1327,30 @@ func (p *hpScreen) stats(sess *applehp.Session, done <-chan struct{}) {
 		st := sess.Stats()
 		p.mu.Lock()
 		dropped := p.dropped
+		sent, wholes := p.picSent, p.picWholes
+		rung, took := hpRungs[p.rung], p.tookLast
+		base := p.baseNow
+		if p.baseWas > 0 && (base == 0 || p.baseWas < base) {
+			base = p.baseWas
+		}
 		p.mu.Unlock()
 		secs := every.Seconds()
+		fps, kbps := float64(st.Frames-last.Frames)/secs, float64(st.Bytes-last.Bytes)*8/1000/secs
+		if adaptive {
+			fps, kbps = float64(wholes-lastWholes)/secs, float64(sent-lastSent)*8/1000/secs
+			if wholes != lastWholes && notes < 600 {
+				notes++
+				text := fmt.Sprintf("adaptive: 1/%d size, quality %d; an update shown in %d ms at the least, %d ms the last; %.0f a second, %.0f KB a second",
+					rung.scale, rung.quality, base.Milliseconds(), took.Milliseconds(), fps, float64(sent-lastSent)/1024/secs)
+				if b, err := json.Marshal(map[string]any{"s": "note", "text": text}); err == nil {
+					p.push(swToStatus, b)
+				}
+			}
+			lastSent, lastWholes = sent, wholes
+		}
 		b, err := json.Marshal(map[string]any{"s": "stats",
-			"fps":   float64(st.Frames-last.Frames) / secs,
-			"kbps":  float64(st.Bytes-last.Bytes) * 8 / 1000 / secs,
+			"fps":   fps,
+			"kbps":  kbps,
 			"audio": float64(st.AudioPackets-last.AudioPackets) / secs,
 			"lost":  st.FramesLost, "keyframes": st.Keyframes, "bad": st.VideoBad, "dropped": dropped, "asks": st.KeyAsks})
 		last = st
@@ -1310,15 +1466,7 @@ func (p *hpScreen) take(f hpFrame, port int) bool {
 				sess.RequestKeyframe()
 			}
 		case "shown":
-			p.mu.Lock()
-			if o.N > p.shown {
-				p.shown = o.N
-			}
-			p.mu.Unlock()
-			select {
-			case p.shownCame <- struct{}{}:
-			default:
-			}
+			p.wasShown(o.N)
 		case "mode":
 			if sess != nil {
 				_ = sess.SetMode(!o.Observe)
