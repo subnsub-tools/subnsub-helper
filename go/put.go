@@ -41,9 +41,12 @@ package main
 //	                             page's screen was on)
 //	{"op":"path","agent":"…"}  → {"ok":true}, then a line a second: how the
 //	                             tailnet and the tunnel reach that Mac (put_path.go)
-//	{"op":"screen-hp"}         → {"ok":true}, then this Mac's own Screen Sharing
-//	                             as out's frames, the helper signing in to it
-//	                             (screenhp.go)
+//
+// Until 2026.11.25.4 there was {"op":"screen-hp"}: the helper signed in to
+// this Mac's own Screen Sharing for out and sent out its session. out is that
+// client itself now (user 2026-11-25: the helper only gives a road and a
+// port; it has nothing to do with screen sharing), and out on the Mac being
+// viewed carries Screen Sharing's bytes on a put stream like any other.
 //
 // put keeps a few accepts waiting, so a stream from another Mac is handed to
 // one at once; with none waiting (put is not running) the other side is told
@@ -895,7 +898,7 @@ func servePutLocal(c net.Conn) {
 	// Only the user's own programs reach this socket, and put asks these: it
 	// is on this Mac. A hint rather than proof of the app, as the socket is.
 	switch ask.Op {
-	case "peers", "open", "accept", "screen", "screen-hp", "path", "host", "unhost":
+	case "peers", "open", "accept", "screen", "path", "host", "unhost":
 		putSeen.Store(true)
 	}
 	switch ask.Op {
@@ -913,9 +916,6 @@ func servePutLocal(c net.Conn) {
 			"tunnel": directAddress() != "", "version": helperVersion,
 			// Whether a Shelf item can be given a link here (host.go).
 			"host": hostAvailable(),
-			// Whether this Mac's screen is shown through its Screen Sharing
-			// (screenhp.go).
-			"screenhp": screenHPAvailable(),
 		})
 		c.Close()
 	case "accept":
@@ -934,13 +934,6 @@ func servePutLocal(c net.Conn) {
 		putParkScreen(c)
 	case "path":
 		putPathServe(c, ask.Agent)
-	case "screen-hp":
-		if r.Buffered() > 0 {
-			// Nothing may follow until the answer has come.
-			c.Close()
-			return
-		}
-		screenHPServe(c)
 	case "open":
 		putOpen(c, r, ask.Agent)
 	case "host", "unhost":
