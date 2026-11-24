@@ -19,7 +19,9 @@ package main
 // carries this kind: runCommand does not know it, so it is refused there as
 // any unknown kind is. A portable copy's certificate names nothing of it, so
 // a copy has no screen. MON_SCREEN=off turns it off while leaving the
-// terminal on.
+// terminal on. On a Mac, only where out is installed, and only while out's
+// switch for showing this Mac's screen on the Monitor page is on: out keeps a
+// connection waiting at put.sock while it is (put.go putScreenOn).
 //
 // WHAT THE SIGNATURE BUYS. As for a terminal: the command answers with a
 // session token, 128 random bits, good only on the tunnel of the peer that
@@ -34,7 +36,8 @@ package main
 // BOUNDS. Three sessions at once. A session nobody has shown a sign of life
 // on (bytes sent, or the page's beat) for screenQuietMax is ended, and so is
 // every session the moment the console is switched off, the last key is
-// unpinned, or the opener's key leaves the allowlist (sweep).
+// unpinned, the opener's key leaves the allowlist, or on a Mac out's switch
+// for the screen is turned off or out quits (sweep, every screenSweepEvery).
 
 import (
 	"crypto/ed25519"
@@ -84,8 +87,7 @@ type screenSess struct {
 	peer  key.NodePublic
 	// The pinned key that signed the opening: unpinning it ends the session.
 	signer ed25519.PublicKey
-	// The VNC server's connection, or out's (put.go), which is read and
-	// written the same way.
+	// The VNC server's connection.
 	conn net.Conn
 	// The server's version line, read to know it is VNC, sent to the page
 	// before anything else.
@@ -199,12 +201,9 @@ func (hub *screenHub) dial() (net.Conn, []byte, error) {
 // open connects a session for peer. The caller has verified the command's
 // signature and that a key is pinned. Returns the token, or a refusal code.
 //
-// mode "out" is the screen shown by out, the Mac app (put.go): the session's
-// two streams are handed to a connection out keeps waiting, and carry its
-// frames instead of a VNC server's bytes. Any other mode is VNC. On a Mac
-// either takes out being installed (user 2026-11-21: only a Mac with out is
-// shown).
-func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey, mode string) (string, string) {
+// On a Mac it takes out being installed (user 2026-11-21: only a Mac with out
+// is shown) and out's switch for the screen being on.
+func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey) (string, string) {
 	if !consoleEnabled() {
 		return "", "console-off"
 	}
@@ -214,8 +213,9 @@ func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey, mode s
 	if !screenHostOK() {
 		return "", "no-out"
 	}
-	if mode == "out" && !putSupported {
-		return "", "no-out"
+	if putSupported && !putScreenOn() {
+		// out is not running, or its switch for the screen is off.
+		return "", "out-not-ready"
 	}
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -228,21 +228,9 @@ func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey, mode s
 	}
 	hub.pending++
 	hub.mu.Unlock()
-	var conn net.Conn
-	var hello []byte
-	var err error
-	if mode == "out" {
-		conn = putTakeScreen()
-	} else {
-		conn, hello, err = hub.dial()
-	}
+	conn, hello, err := hub.dial()
 	hub.mu.Lock()
 	hub.pending--
-	if mode == "out" && conn == nil {
-		hub.mu.Unlock()
-		// out is not running, or its switch for the screen is off.
-		return "", "out-not-ready"
-	}
 	if err != nil {
 		hub.mu.Unlock()
 		warnf("screen: no VNC server at port %d: %v", screenPort(), err)
@@ -324,7 +312,8 @@ func (hub *screenHub) sweep(t time.Time) {
 	if len(all) == 0 {
 		return
 	}
-	open := screenEnabled()
+	// On a Mac, also out's switch for the screen (putScreenOn).
+	open := screenEnabled() && (!putSupported || putScreenOn())
 	for _, s := range all {
 		s.mu.Lock()
 		quiet := t.Sub(s.seen) > screenQuietMax

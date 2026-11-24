@@ -36,8 +36,9 @@ package main
 //	{"op":"open","agent":"…"}  → {"ok":true,"route":"tailnet|direct|derp|"} then put's bytes,
 //	                             or {"ok":false,"error":"<code>"}
 //	{"op":"accept"}            → waits; {"from":"…","name":"…"} then put's bytes
-//	{"op":"screen"}            → waits; {"from":"page"} then a screen session's
-//	                             two streams, the page's own (screen.go)
+//	{"op":"screen"}            → waits, kept open while out's switch for showing
+//	                             this Mac's screen on the Monitor page is on;
+//	                             nothing more comes (screen.go asks putScreenOn)
 //	{"op":"path","agent":"…"}  → {"ok":true}, then a line a second: how the
 //	                             tailnet and the tunnel reach that Mac (put_path.go)
 //	{"op":"screen-hp"}         → {"ok":true}, then this Mac's own Screen Sharing
@@ -112,10 +113,8 @@ const (
 
 var putAgentRE = regexp.MustCompile(`^[A-Za-z0-9_-]{4,40}$`)
 
-// Where put runs at all: a Mac. A test turns it on elsewhere, in process or,
-// for a test that runs the helper itself against a stand-in for the app
-// (cmd/outmock), with MON_OUT_TEST=1.
-var putSupported = runtime.GOOS == "darwin" || os.Getenv("MON_OUT_TEST") == "1"
+// Where put runs at all: a Mac. A test turns it on elsewhere, in process.
+var putSupported = runtime.GOOS == "darwin"
 
 // Where put is installed: its install line and its updater keep it in
 // Applications. A test points it elsewhere.
@@ -695,47 +694,49 @@ var putLocal struct {
 	sync.Mutex
 	on      bool
 	accepts []net.Conn
-	// Connections put keeps waiting for a screen session from the Monitor
-	// page (screen.go): the app shows this Mac's screen on it.
+	// Connections out keeps waiting here while its switch for showing this
+	// Mac's screen on the Monitor page is on (screen.go asks putScreenOn).
 	screens []net.Conn
 }
 
-// A screen is one page's at a time; put keeps a spare waiting.
+// out keeps two waiting; more are its earlier ones.
 const putMaxScreens = 4
 
-// putParkScreen keeps a connection of put's waiting for a screen session.
+// putParkScreen keeps a connection of out's waiting, for as long as out keeps
+// it open: out sends nothing more on it, and lets it go when its switch is
+// turned off or it quits. Until helper 2026.11.24.9 a page's session was
+// handed to it, for the page's High Performance viewer (gone since: user
+// 2026-11-24, the web page needs ordinary VNC alone); out still waits for that
+// word, which no longer comes.
 func putParkScreen(c net.Conn) {
 	putLocal.Lock()
-	defer putLocal.Unlock()
 	if len(putLocal.screens) >= putMaxScreens {
 		putLocal.screens[0].Close()
 		putLocal.screens = putLocal.screens[1:]
 	}
 	putLocal.screens = append(putLocal.screens, c)
+	putLocal.Unlock()
+	go func() {
+		var b [1]byte
+		c.Read(b[:])
+		putLocal.Lock()
+		for i, x := range putLocal.screens {
+			if x == c {
+				putLocal.screens = append(putLocal.screens[:i], putLocal.screens[i+1:]...)
+				break
+			}
+		}
+		putLocal.Unlock()
+		c.Close()
+	}()
 }
 
-// putTakeScreen hands a waiting connection the word that a page's screen
-// session is its own from here on, and takes it out of the pool: nil where
-// put keeps none waiting (it is not running, or its switch for the screen is
-// off). One whose put has gone away fails the write and the next is tried.
-func putTakeScreen() net.Conn {
-	for {
-		putLocal.Lock()
-		if len(putLocal.screens) == 0 {
-			putLocal.Unlock()
-			return nil
-		}
-		c := putLocal.screens[0]
-		putLocal.screens = putLocal.screens[1:]
-		putLocal.Unlock()
-		c.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		if _, err := c.Write([]byte("{\"from\":\"page\"}\n")); err != nil {
-			c.Close()
-			continue
-		}
-		c.SetWriteDeadline(time.Time{})
-		return c
-	}
+// putScreenOn is whether out keeps a connection waiting here: its switch for
+// showing this Mac's screen on the Monitor page is on.
+func putScreenOn() bool {
+	putLocal.Lock()
+	defer putLocal.Unlock()
+	return len(putLocal.screens) > 0
 }
 
 func putSockPath() string {

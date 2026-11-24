@@ -838,14 +838,11 @@ func directCapsFor(r *http.Request) []string {
 				caps = append(caps, transport.CapTailnetMap)
 				// The machine's screen (screen.go): the console's grant, to a
 				// browser on the list and not a portable copy, where a key is
-				// pinned.
-				// On a Mac, only where out is installed, and there out can
-				// show the screen itself (screen.go, put.go).
+				// pinned. On a Mac, only where out is installed (and opened
+				// only while out's switch for it is on, which the opening
+				// says).
 				if screenEnabled() && loadTrust().sealed && screenHostOK() {
 					caps = append(caps, transport.CapScreen)
-					if putSupported {
-						caps = append(caps, transport.CapScreenOut)
-					}
 				}
 				// put on this Mac reaching put on the owner's other Macs
 				// (put.go): where put runs and a key is pinned, the list
@@ -1041,13 +1038,13 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 			releaseCmd()
 			res = consoleResult{ID: c.ID, Kind: "screen", Code: -1, Error: "not-allowed"}
 			if peer, ok := transport.PeerFromContext(r.Context()); ok && clone == nil {
-				// cmd "out" asks for the screen as out shows it (put.go);
-				// anything else is the VNC server's bytes.
-				mode := ""
+				// cmd "out" asked for the screen as out showed it, for the
+				// page's High Performance viewer, which is gone (user
+				// 2026-11-24): a page from before is told out is not ready,
+				// and its press for that connects by VNC.
 				if c.Cmd == "out" {
-					mode = "out"
-				}
-				if tok, why := h.screens.open(peer, commandSigner(c, id, loadTrust()), mode); why != "" {
+					res.Error = "out-not-ready"
+				} else if tok, why := h.screens.open(peer, commandSigner(c, id, loadTrust())); why != "" {
 					res.Error = why
 				} else {
 					res = consoleResult{ID: c.ID, Kind: "screen", Code: 0, Out: tok}

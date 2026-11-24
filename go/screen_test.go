@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"io"
 	"net"
@@ -75,12 +74,12 @@ func TestScreenOpenGates(t *testing.T) {
 	defer hub.endAll()
 
 	t.Setenv(consoleEnvVar, "0")
-	if _, why := hub.open(peer, nil, ""); why != "console-off" {
+	if _, why := hub.open(peer, nil); why != "console-off" {
 		t.Errorf("console off must refuse: %q", why)
 	}
 	t.Setenv(consoleEnvVar, "1")
 	t.Setenv(screenEnvVar, "off")
-	if _, why := hub.open(peer, nil, ""); why != "screen-off" {
+	if _, why := hub.open(peer, nil); why != "screen-off" {
 		t.Errorf("MON_SCREEN=off must refuse: %q", why)
 	}
 	t.Setenv(screenEnvVar, "")
@@ -88,18 +87,18 @@ func TestScreenOpenGates(t *testing.T) {
 	// Nothing listening, or something that is not VNC: no screen.
 	none := newScreenHub()
 	none.addrs = func() []string { return []string{closedPort(t)} }
-	if _, why := none.open(peer, nil, ""); why != "no-vnc" {
+	if _, why := none.open(peer, nil); why != "no-vnc" {
 		t.Errorf("no listener must be no-vnc: %q", why)
 	}
 	web, _ := fakeVNC(t, "HTTP/1.1 400 Bad Request\r\n\r\n")
 	other := newScreenHub()
 	other.addrs = func() []string { return []string{web} }
-	if _, why := other.open(peer, nil, ""); why != "no-vnc" {
+	if _, why := other.open(peer, nil); why != "no-vnc" {
 		t.Errorf("a server that is not VNC must be no-vnc: %q", why)
 	}
 
 	for i := 0; i < screenMaxSessions; i++ {
-		tok, why := hub.open(peer, nil, "")
+		tok, why := hub.open(peer, nil)
 		if why != "" {
 			t.Fatalf("session %d refused: %s", i, why)
 		}
@@ -107,7 +106,7 @@ func TestScreenOpenGates(t *testing.T) {
 			t.Fatalf("token shape: %q", tok)
 		}
 	}
-	if _, why := hub.open(peer, nil, ""); why != "busy" {
+	if _, why := hub.open(peer, nil); why != "busy" {
 		t.Errorf("past the ceiling must be busy: %q", why)
 	}
 }
@@ -139,7 +138,7 @@ func TestScreenSweep(t *testing.T) {
 	defer hub.endAll()
 	peer := key.NewNode().Public()
 	count := func() int { hub.mu.Lock(); defer hub.mu.Unlock(); return len(hub.sess) }
-	if _, why := hub.open(peer, nil, ""); why != "" {
+	if _, why := hub.open(peer, nil); why != "" {
 		t.Fatalf("open refused: %s", why)
 	}
 	hub.sweep(time.Now())
@@ -155,7 +154,7 @@ func TestScreenSweep(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("ending a session must close its connection to the server")
 	}
-	if _, why := hub.open(peer, nil, ""); why != "" {
+	if _, why := hub.open(peer, nil); why != "" {
 		t.Fatalf("open refused: %s", why)
 	}
 	t.Setenv(consoleEnvVar, "0")
@@ -189,7 +188,7 @@ func TestScreenStreamsOverTheHandler(t *testing.T) {
 		h.ServeHTTP(w, r.WithContext(transport.WithPeer(r.Context(), k)))
 	}))
 	defer srv.Close()
-	tok, why := h.screens.open(owner, nil, "")
+	tok, why := h.screens.open(owner, nil)
 	if why != "" {
 		t.Fatalf("open refused: %s", why)
 	}
@@ -306,7 +305,7 @@ func TestScreenReaderGoneEndsSession(t *testing.T) {
 		h.ServeHTTP(w, r.WithContext(transport.WithPeer(r.Context(), owner)))
 	}))
 	defer srv.Close()
-	tok, why := h.screens.open(owner, nil, "")
+	tok, why := h.screens.open(owner, nil)
 	if why != "" {
 		t.Fatalf("open refused: %s", why)
 	}
@@ -349,9 +348,8 @@ func TestScreenNotOnTheMailbox(t *testing.T) {
 	}
 }
 
-// A Mac's screen is shown only where out is installed; there out can show
-// it itself, on a connection it keeps waiting at the helper, and the VNC
-// road is as it was.
+// A Mac's screen is shown only where out is installed, and only while out
+// keeps a connection waiting at the helper (its switch for it is on).
 func TestScreenOnAMac(t *testing.T) {
 	t.Setenv(consoleEnvVar, "1")
 	home := t.TempDir()
@@ -367,75 +365,61 @@ func TestScreenOnAMac(t *testing.T) {
 	defer hub.endAll()
 	peer := key.NewNode().Public()
 
-	// No out: no screen, whichever way; and that it once asked this helper
-	// something does not make it installed.
+	// No out: no screen; and that it once asked this helper something does
+	// not make it installed.
 	putSeen.Store(true)
 	if screenHostOK() {
 		t.Fatal("a Mac without out is said to show its screen")
 	}
-	for _, mode := range []string{"", "out"} {
-		if _, why := hub.open(peer, nil, mode); why != "no-out" {
-			t.Errorf("mode %q without out: %q", mode, why)
-		}
+	if _, why := hub.open(peer, nil); why != "no-out" {
+		t.Errorf("without out: %q", why)
 	}
-	// out installed: VNC as before; out's own way only once it waits here.
+	// out installed: the screen only while out keeps a connection waiting
+	// here, its switch for it on.
 	if err := os.MkdirAll(app, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if !screenHostOK() {
 		t.Fatal("a Mac with out installed is said not to show its screen")
 	}
-	if _, why := hub.open(peer, nil, ""); why != "" {
-		t.Fatalf("VNC on a Mac with out: %q", why)
-	}
-	if _, why := hub.open(peer, nil, "out"); why != "out-not-ready" {
-		t.Fatalf("out not waiting: %q", why)
+	if _, why := hub.open(peer, nil); why != "out-not-ready" {
+		t.Fatalf("out's switch off: %q", why)
 	}
 	mine, outs := net.Pipe()
 	defer outs.Close()
 	putParkScreen(mine)
-	got := make(chan string, 1)
-	go func() {
-		line, _ := bufio.NewReader(outs).ReadString('\n')
-		got <- line
-		// What out sends is what the session's stream carries.
-		outs.Write([]byte("frames"))
-	}()
-	tok, why := hub.open(peer, nil, "out")
+	tok, why := hub.open(peer, nil)
 	if why != "" {
-		t.Fatalf("out waiting: %q", why)
-	}
-	select {
-	case line := <-got:
-		if line != "{\"from\":\"page\"}\n" {
-			t.Fatalf("out was told %q", line)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("out was not told of the session")
+		t.Fatalf("out's switch on: %q", why)
 	}
 	hub.mu.Lock()
 	s := hub.sess[tok]
 	hub.mu.Unlock()
-	if s == nil || len(s.hello) != 0 {
-		t.Fatal("out's session has no VNC version line")
+	if s == nil || string(s.hello) != "RFB 003.008\n" {
+		t.Fatal("the session is not the VNC server's")
 	}
-	buf := make([]byte, 6)
-	s.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := io.ReadFull(s.conn, buf); err != nil || string(buf) != "frames" {
-		t.Fatalf("the stream carries %q, %v", buf, err)
+	// The connection out keeps waiting is not the session's, and waits on.
+	if !putScreenOn() {
+		t.Fatal("opening a screen took out's waiting connection")
 	}
-	// The session's end is the connection's: out sees it close.
-	hub.end(s)
-	outs.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := outs.Read(buf); err == nil {
-		t.Fatal("ending the session left out's connection open")
+	// out lets it go (its switch turned off, or out quit): no screen.
+	outs.Close()
+	for end := time.Now().Add(3 * time.Second); putScreenOn() && time.Now().Before(end); {
+		time.Sleep(10 * time.Millisecond)
 	}
-	// One whose out has gone is passed over for the next.
-	dead, deadOther := net.Pipe()
-	deadOther.Close()
-	putParkScreen(dead)
-	if _, why := hub.open(peer, nil, "out"); why != "out-not-ready" {
-		t.Fatalf("a connection whose out has gone: %q", why)
+	if putScreenOn() {
+		t.Fatal("a connection out let go still counts")
+	}
+	// and the session open meanwhile ends.
+	hub.sweep(time.Now())
+	hub.mu.Lock()
+	left := len(hub.sess)
+	hub.mu.Unlock()
+	if left != 0 {
+		t.Fatal("out's switch turned off left a page's session open")
+	}
+	if _, why := hub.open(peer, nil); why != "out-not-ready" {
+		t.Fatalf("after out let go: %q", why)
 	}
 
 	// Elsewhere there is no out, and VNC needs none.
@@ -443,7 +427,7 @@ func TestScreenOnAMac(t *testing.T) {
 	if !screenHostOK() {
 		t.Fatal("a machine that is not a Mac needs no out")
 	}
-	if _, why := hub.open(peer, nil, "out"); why != "no-out" {
-		t.Fatalf("out's way where out does not run: %q", why)
+	if _, why := hub.open(peer, nil); why != "" {
+		t.Fatalf("VNC where out does not run: %q", why)
 	}
 }
