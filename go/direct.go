@@ -838,9 +838,7 @@ func directCapsFor(r *http.Request) []string {
 				caps = append(caps, transport.CapTailnetMap)
 				// The machine's screen (screen.go): the console's grant, to a
 				// browser on the list and not a portable copy, where a key is
-				// pinned. On a Mac, only where out is installed (and opened
-				// only while out's switch for it is on, which the opening
-				// says).
+				// pinned. On a Mac, only where out is installed.
 				if screenEnabled() && loadTrust().sealed && screenHostOK() {
 					caps = append(caps, transport.CapScreen)
 				}

@@ -36,9 +36,9 @@ package main
 //	{"op":"open","agent":"…"}  → {"ok":true,"route":"tailnet|direct|derp|"} then put's bytes,
 //	                             or {"ok":false,"error":"<code>"}
 //	{"op":"accept"}            → waits; {"from":"…","name":"…"} then put's bytes
-//	{"op":"screen"}            → waits, kept open while out's switch for showing
-//	                             this Mac's screen on the Monitor page is on;
-//	                             nothing more comes (screen.go asks putScreenOn)
+//	{"op":"screen"}            → waits; nothing comes (out until 0.1.91 kept
+//	                             it open while its switch for the Monitor
+//	                             page's screen was on)
 //	{"op":"path","agent":"…"}  → {"ok":true}, then a line a second: how the
 //	                             tailnet and the tunnel reach that Mac (put_path.go)
 //	{"op":"screen-hp"}         → {"ok":true}, then this Mac's own Screen Sharing
@@ -694,8 +694,8 @@ var putLocal struct {
 	sync.Mutex
 	on      bool
 	accepts []net.Conn
-	// Connections out keeps waiting here while its switch for showing this
-	// Mac's screen on the Monitor page is on (screen.go asks putScreenOn).
+	// Connections out until 0.1.91 keeps waiting here while its switch for
+	// the Monitor page's screen is on; nothing reads them now.
 	screens []net.Conn
 }
 
@@ -703,11 +703,12 @@ var putLocal struct {
 const putMaxScreens = 4
 
 // putParkScreen keeps a connection of out's waiting, for as long as out keeps
-// it open: out sends nothing more on it, and lets it go when its switch is
-// turned off or it quits. Until helper 2026.11.24.9 a page's session was
-// handed to it, for the page's High Performance viewer (gone since: user
-// 2026-11-24, the web page needs ordinary VNC alone); out still waits for that
-// word, which no longer comes.
+// it open: out until 0.1.91 sends nothing more on it, and lets it go when its
+// switch is turned off or it quits. Until helper 2026.11.24.9 a page's session
+// was handed to it, for the page's High Performance viewer (gone since: user
+// 2026-11-24, the web page needs ordinary VNC alone); and until 2026.11.25.1
+// the page's screen opened only while out kept one (user 2026-11-25: the
+// switch is gone). out still waits for a word that no longer comes.
 func putParkScreen(c net.Conn) {
 	putLocal.Lock()
 	if len(putLocal.screens) >= putMaxScreens {
@@ -729,14 +730,6 @@ func putParkScreen(c net.Conn) {
 		putLocal.Unlock()
 		c.Close()
 	}()
-}
-
-// putScreenOn is whether out keeps a connection waiting here: its switch for
-// showing this Mac's screen on the Monitor page is on.
-func putScreenOn() bool {
-	putLocal.Lock()
-	defer putLocal.Unlock()
-	return len(putLocal.screens) > 0
 }
 
 func putSockPath() string {

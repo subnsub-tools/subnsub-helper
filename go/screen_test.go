@@ -348,8 +348,7 @@ func TestScreenNotOnTheMailbox(t *testing.T) {
 	}
 }
 
-// A Mac's screen is shown only where out is installed, and only while out
-// keeps a connection waiting at the helper (its switch for it is on).
+// A Mac's screen is shown only where out is installed.
 func TestScreenOnAMac(t *testing.T) {
 	t.Setenv(consoleEnvVar, "1")
 	home := t.TempDir()
@@ -374,52 +373,22 @@ func TestScreenOnAMac(t *testing.T) {
 	if _, why := hub.open(peer, nil); why != "no-out" {
 		t.Errorf("without out: %q", why)
 	}
-	// out installed: the screen only while out keeps a connection waiting
-	// here, its switch for it on.
+	// out installed: the screen, VNC as on any machine.
 	if err := os.MkdirAll(app, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if !screenHostOK() {
 		t.Fatal("a Mac with out installed is said not to show its screen")
 	}
-	if _, why := hub.open(peer, nil); why != "out-not-ready" {
-		t.Fatalf("out's switch off: %q", why)
-	}
-	mine, outs := net.Pipe()
-	defer outs.Close()
-	putParkScreen(mine)
 	tok, why := hub.open(peer, nil)
 	if why != "" {
-		t.Fatalf("out's switch on: %q", why)
+		t.Fatalf("VNC on a Mac with out: %q", why)
 	}
 	hub.mu.Lock()
 	s := hub.sess[tok]
 	hub.mu.Unlock()
 	if s == nil || string(s.hello) != "RFB 003.008\n" {
 		t.Fatal("the session is not the VNC server's")
-	}
-	// The connection out keeps waiting is not the session's, and waits on.
-	if !putScreenOn() {
-		t.Fatal("opening a screen took out's waiting connection")
-	}
-	// out lets it go (its switch turned off, or out quit): no screen.
-	outs.Close()
-	for end := time.Now().Add(3 * time.Second); putScreenOn() && time.Now().Before(end); {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if putScreenOn() {
-		t.Fatal("a connection out let go still counts")
-	}
-	// and the session open meanwhile ends.
-	hub.sweep(time.Now())
-	hub.mu.Lock()
-	left := len(hub.sess)
-	hub.mu.Unlock()
-	if left != 0 {
-		t.Fatal("out's switch turned off left a page's session open")
-	}
-	if _, why := hub.open(peer, nil); why != "out-not-ready" {
-		t.Fatalf("after out let go: %q", why)
 	}
 
 	// Elsewhere there is no out, and VNC needs none.

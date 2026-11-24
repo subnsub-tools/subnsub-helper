@@ -19,9 +19,9 @@ package main
 // carries this kind: runCommand does not know it, so it is refused there as
 // any unknown kind is. A portable copy's certificate names nothing of it, so
 // a copy has no screen. MON_SCREEN=off turns it off while leaving the
-// terminal on. On a Mac, only where out is installed, and only while out's
-// switch for showing this Mac's screen on the Monitor page is on: out keeps a
-// connection waiting at put.sock while it is (put.go putScreenOn).
+// terminal on. On a Mac, only where out is installed (user 2026-11-25: the
+// page's screen follows the console's switch as on any other machine, and
+// out's own switch for it is gone).
 //
 // WHAT THE SIGNATURE BUYS. As for a terminal: the command answers with a
 // session token, 128 random bits, good only on the tunnel of the peer that
@@ -36,8 +36,7 @@ package main
 // BOUNDS. Three sessions at once. A session nobody has shown a sign of life
 // on (bytes sent, or the page's beat) for screenQuietMax is ended, and so is
 // every session the moment the console is switched off, the last key is
-// unpinned, the opener's key leaves the allowlist, or on a Mac out's switch
-// for the screen is turned off or out quits (sweep, every screenSweepEvery).
+// unpinned, or the opener's key leaves the allowlist (sweep).
 
 import (
 	"crypto/ed25519"
@@ -202,7 +201,7 @@ func (hub *screenHub) dial() (net.Conn, []byte, error) {
 // signature and that a key is pinned. Returns the token, or a refusal code.
 //
 // On a Mac it takes out being installed (user 2026-11-21: only a Mac with out
-// is shown) and out's switch for the screen being on.
+// is shown).
 func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey) (string, string) {
 	if !consoleEnabled() {
 		return "", "console-off"
@@ -212,10 +211,6 @@ func (hub *screenHub) open(peer key.NodePublic, signer ed25519.PublicKey) (strin
 	}
 	if !screenHostOK() {
 		return "", "no-out"
-	}
-	if putSupported && !putScreenOn() {
-		// out is not running, or its switch for the screen is off.
-		return "", "out-not-ready"
 	}
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -312,8 +307,7 @@ func (hub *screenHub) sweep(t time.Time) {
 	if len(all) == 0 {
 		return
 	}
-	// On a Mac, also out's switch for the screen (putScreenOn).
-	open := screenEnabled() && (!putSupported || putScreenOn())
+	open := screenEnabled()
 	for _, s := range all {
 		s.mu.Lock()
 		quiet := t.Sub(s.seen) > screenQuietMax
