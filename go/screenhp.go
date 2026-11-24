@@ -112,12 +112,16 @@ package main
 // 400). Nothing of the picture is made here then, and no JPEG. The updates
 // are numbered and said back as an adaptive session's are. The Mac sends a
 // changed place for each asking, the oldest first, and is asked again at
-// once while fewer than hpCodedAhead updates and no more than hpCodedBytes
-// are on their way to the viewer: small places go many to a round trip, a
-// whole display one at a time (user 2026-11-24, measured that day: with
-// three updates on the way and a pause after one that repeated the last, a
-// click on m2 showed 0.4 to 0.6 s after the press where the system's viewer
-// took 0.1). Its own viewer has the Mac send changed places unasked, paced
+// once while fewer than hpCodedAhead updates are on their way to the viewer
+// and those before the newest come to no more than hpCodedBytes: small
+// places go many to a round trip, and a large one always has the next on
+// its way behind it (user 2026-11-24, measured that day: with three updates
+// on the way and a pause after one that repeated the last, a click on m2
+// showed 0.4 to 0.6 s after the press where the system's viewer took 0.1;
+// 2026-11-25, with 32 KB on the way at the most, the newest counted, a
+// window scrolling there changed 2.1 times a second where the system's
+// viewer showed 5.9, a large update waiting each time for the last to be
+// shown). Its own viewer has the Mac send changed places unasked, paced
 // by how fast it reads; this helper reads on this Mac, where that pacing
 // would let the Mac queue far more than the way to the viewer carries.
 //
@@ -677,12 +681,13 @@ const (
 	// frame holds hpFrameMax.
 	hpCodedPiece = 4 << 20
 	// A coded session asks for what changed next while fewer than
-	// hpCodedAhead updates, and no more than hpCodedBytes of them, are on
-	// their way to the viewer's screen (or none at all, however large).
-	// Each update is one changed place (applehp.Session's asking); small
-	// ones, a letter or an icon's highlight, go many to a round trip.
+	// hpCodedAhead updates are on their way to the viewer's screen and
+	// those before the newest come to no more than hpCodedBytes. Each update
+	// is one changed place (applehp.Session's asking); small ones, a letter
+	// or an icon's highlight, go many to a round trip, and the newest goes
+	// however large, so a large one has the next coming behind it.
 	hpCodedAhead = 16
-	hpCodedBytes = 32 << 10
+	hpCodedBytes = 64 << 10
 )
 
 // hpRungs is how a large rectangle goes while the display changes, from the
@@ -781,7 +786,8 @@ func (p *hpScreen) wentSoft(x, y, w, h int, kind uint8) {
 // pictures coming where the viewer's word takes long to come back.
 //
 // A coded session's updates are a changed place each: there it waits while
-// hpCodedAhead of them, or more than hpCodedBytes, are on their way.
+// hpCodedAhead of them are on their way, or more than hpCodedBytes before
+// the newest.
 func (p *hpScreen) awaitShown(serial uint32, coded bool) {
 	p.mu.Lock()
 	ctx := p.route
@@ -795,7 +801,7 @@ func (p *hpScreen) awaitShown(serial uint32, coded bool) {
 		p.mu.Lock()
 		ahead := p.shown >= serial || serial-p.shown < hpShownAhead
 		if coded {
-			ahead = p.shown >= serial || (serial-p.shown < hpCodedAhead && p.inFlight(serial) <= hpCodedBytes)
+			ahead = p.shown >= serial || (serial-p.shown < hpCodedAhead && p.inFlight(serial-1) <= hpCodedBytes)
 		}
 		p.mu.Unlock()
 		if ahead {
