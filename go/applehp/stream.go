@@ -141,9 +141,11 @@ type runState struct {
 	ticks      int
 	// What the viewer has of the picture (BGRA rows, seenW by seenH; a pixel
 	// never sent has nothing in its fourth byte, which no pixel sent has), so
-	// that a rectangle the host sends again as it was is not sent on. Read
-	// and written by the control stream's reader alone. forget: the viewer
-	// asked for the whole picture, and is to get it.
+	// that a rectangle the host sends again as it was is not sent on.
+	// Written by the control stream's reader alone, with seenMu held; read
+	// by it, and by Seen with seenMu held. forget: the viewer asked for the
+	// whole picture, and is to get it.
+	seenMu       sync.Mutex
 	seen         []byte
 	seenW, seenH int
 	forget       bool
@@ -1188,6 +1190,7 @@ func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte)
 		return
 	}
 	pix := s.pixels.bgra(raw, w*hh)
+	rs.seenMu.Lock()
 	if rs.seenW != pw || rs.seenH != ph {
 		rs.seen, rs.seenW, rs.seenH = make([]byte, pw*ph*4), pw, ph
 	} else if forget {
@@ -1203,6 +1206,7 @@ func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte)
 		end--
 	}
 	if top == end {
+		rs.seenMu.Unlock()
 		rs.mu.Lock()
 		rs.stats.Same++
 		rs.mu.Unlock()
@@ -1211,10 +1215,36 @@ func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte)
 	for r := top; r < end; r++ {
 		copy(had(r), pix[r*w*4:(r+1)*w*4])
 	}
+	rs.seenMu.Unlock()
 	rs.passed++
 	if h.Picture != nil {
 		h.Picture(x, y+top, w, end-top, pix[top*w*4:end*w*4])
 	}
+}
+
+// Seen is a rectangle of a standard session's picture as the viewer was last
+// handed it by Handler.Picture: its BGRA rows, exact, the caller's own. Nil
+// when the picture has no such rectangle. It is for a viewer handed some of
+// the picture in a form that is not exact, and due the same pixels exact
+// once the display rests.
+func (s *Session) Seen(x, y, w, h int) []byte {
+	s.runMu.Lock()
+	rs := s.run
+	s.runMu.Unlock()
+	if rs == nil || x < 0 || y < 0 || w <= 0 || h <= 0 {
+		return nil
+	}
+	rs.seenMu.Lock()
+	defer rs.seenMu.Unlock()
+	if x+w > rs.seenW || y+h > rs.seenH || len(rs.seen) < rs.seenW*rs.seenH*4 {
+		return nil
+	}
+	rows := make([]byte, w*h*4)
+	for r := 0; r < h; r++ {
+		at := ((y+r)*rs.seenW + x) * 4
+		copy(rows[r*w*4:(r+1)*w*4], rs.seen[at:at+w*4])
+	}
+	return rows
 }
 
 func (s *Session) onLayout(rs *runState, h Handler, sw, sh, bw, bh int) {
