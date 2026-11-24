@@ -137,7 +137,7 @@ BASE="${MON_BASE:-https://tools.subnsub.com/monitor}"   # where the binaries liv
 # files anybody can check against the source. BASE above when GitHub cannot
 # be reached — the checksums below decide either way (user 2026-11-06).
 GITHUB_RELEASES=https://github.com/subnsub-tools/subnsub-helper/releases
-RELEASE=2026.11.25.1   # stamped by release.sh
+RELEASE=2026.11.25.2   # stamped by release.sh
 NAME=subnsub-helper
 BINDIR="${MON_BINDIR:-$HOME/.local/bin}"
 LABEL=com.subnsub.helper   # shows up in `launchctl list`; brand domain there too
@@ -156,14 +156,14 @@ OLD_LABEL=com.subnsub.monitor
 # script that publishes the binaries. A binary that does not match is not installed, and a swapped binary
 # would otherwise be free to read ~/.claude/.credentials.json and post it
 # somewhere, which no amount of care in the Go source can prevent.
-SUM_linux_amd64=66add20f1b07411a986ceaf1dea99f9da1a90ba341c737c91ef248dda8a60b19
-SUM_linux_arm64=e0155f093c2f52ec4eda9d9193c15030709dea91edc8ad50cedcfffd3de73d62
-SUM_linux_arm=3a82233e213b9969e032230928f188f841fe3957dc75add20a1acacd39c528cb
-SUM_darwin_amd64=5544368c2dc7d1d018f0573a0c385b80b9a55a3d5b392a12d249ae48149e7c4f
-SUM_darwin_arm64=8e9c16b174fd80c318cf7e9c85480bbec0bd1d06e45658fe9694358a898529e9
-SUM_freebsd_amd64=8cf90bbb8b693cb0a47af480539b699179edc05faf9b94c0e0228887cbab5747
-SUM_freebsd_arm64=4fb38b4bbbcb576a9c6dead184223ec896e6fe4389b434abc4bcbf026df2f2e5
-SUM_android_arm64=36d2ab99ef8a46af7a1ddf04d6091dd7690a7f74f57fb7ba7f91a06ce06446ee
+SUM_linux_amd64=31bf59b90a07c2d3b56f896453d1a9ae538e8318dc6d848d9acec69cb92639e8
+SUM_linux_arm64=9c71fa2db5665f894cbbf18d768f3f9f81fbcd7ef5475130576f1cb8647b9285
+SUM_linux_arm=bba25e748f08483c5a01e1802c645a22c20f234290841cae521e0f119a2a5af1
+SUM_darwin_amd64=4819aa51f4d42dc83a902f1ecb9e0d01c2c0306cab379ca4fce6b5cb0acabf96
+SUM_darwin_arm64=d54731f97faae59558b64d35720c10f8126f6c07fff648e9b8c25c6de82127a5
+SUM_freebsd_amd64=ee92f9839e5d3fb49e810607aebe68b0288f3a18ff0ab8bf3a3d883756c18663
+SUM_freebsd_arm64=6322537bb3b18791f76795dc1db5f4773b3e01b4e38b9093d6ccea00a3738a36
+SUM_android_arm64=365f2e062e40d9f6f365fc79b8e78c7d875992e5ed875a5e23e0b49359d559c4
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
