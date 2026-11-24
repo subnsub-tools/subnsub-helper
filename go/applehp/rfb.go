@@ -63,6 +63,15 @@ var (
 		-223, 1101, 1105, 1107, 1109, 1110,
 	}
 
+	// CodedEncodings is what a standard session names when its viewer reads
+	// the Mac's own picture codec (Config.Coded): that codec first, which
+	// makes it the one the Mac sends, then pixels deflated, for whatever the
+	// Mac sends exact, and the rectangles StandardEncodings has.
+	CodedEncodings = []int32{
+		EncAppleMVS, EncZlib, 1104, 1100,
+		-223, 1101, 1105, 1107, 1109, 1110,
+	}
+
 	sessionSelectMagic = []byte{0x00, 0x4a, 0x00, 0x01}
 
 	// DefaultViewerOSVer matches a stable macOS Sequoia release so hosts of all

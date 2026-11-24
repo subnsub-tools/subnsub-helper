@@ -71,6 +71,11 @@ type Config struct {
 	// session; stream.go Handler.Picture). No UDP socket is bound.
 	Standard bool
 	Logf     func(format string, args ...any)
+	// Coded, in a standard session, names the Mac's own picture codec first
+	// (CodedEncodings, RFB encoding 0x3f3: what Screen Sharing sends in
+	// Adaptive Quality). Its rectangles are handed over as they came
+	// (Handler.PictureCoded), unread here, for a viewer that decodes them.
+	Coded bool
 }
 
 // DefaultConfig returns sensible defaults for browser-compatible H.264 probing.
@@ -565,7 +570,11 @@ func connectStandard(ctx context.Context, cfg Config, destIP string) (*Session, 
 	var ab aborter
 	stopAbort := context.AfterFunc(ctx, ab.abort)
 	defer stopAbort()
-	o, err := signedIn(ctx, &cfg, remoteAddr, StandardEncodings, ab.hold)
+	encs := StandardEncodings
+	if cfg.Coded {
+		encs = CodedEncodings
+	}
+	o, err := signedIn(ctx, &cfg, remoteAddr, encs, ab.hold)
 	if err != nil {
 		return nil, err
 	}
@@ -574,7 +583,7 @@ func connectStandard(ctx context.Context, cfg Config, destIP string) (*Session, 
 		_ = o.tc.Close()
 		return nil, err
 	}
-	if err := o.cipher.EncryptAndSend(o.tc, BuildSetEncodings(StandardEncodings)); err != nil {
+	if err := o.cipher.EncryptAndSend(o.tc, BuildSetEncodings(encs)); err != nil {
 		return fail(fmt.Errorf("applehp: send encrypted SetEncodings: %w", err))
 	}
 	pixels := o.pixels

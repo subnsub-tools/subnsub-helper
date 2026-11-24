@@ -51,9 +51,16 @@ package main
 //	                  Flag 1 = the update is whole: show it. That one has
 //	                  no rectangle, and to a viewer that said jpeg its x
 //	                  and y are the update's number, high half and low
-//	                  (never zero), which the viewer says back
+//	                  (never zero), which the viewer says back. With flag
+//	                  4 (only to a viewer whose open said mvs), the
+//	                  rectangle as the Mac's Screen Sharing sent it in its
+//	                  own codec (RFB encoding 0x3f3, what follows its four
+//	                  bytes of length), which the viewer decodes; flag 8
+//	                  with it = the first of a session: the viewer's
+//	                  decoder forgets what it knew; flag 16 with it = the
+//	                  next piece holds more of the same rectangle's bytes
 //	from the viewer 1 control (JSON): open {codecs, audio, kbps, user,
-//	                  password, own, standard, jpeg, scaled, w, h, scale}, size {w
+//	                  password, own, standard, jpeg, scaled, mvs, w, h, scale}, size {w
 //	                  h scale}, kbps, mode {observe} (told to the Mac, as
 //	                  its own viewer does), key, clip {text} (any text;
 //	                  status clip {ok: false} when it did not go: too long
@@ -94,6 +101,18 @@ package main
 // JPEG of good quality if what it has is less, and a quarter of a second
 // after that the same pixels exact. A small rectangle (a letter typed, the
 // insertion point) is exact from the start.
+//
+// mvs in open, with jpeg, has the Mac's Screen Sharing asked for its own
+// Adaptive Quality codec instead (a coded session), and what it sends
+// handed to the viewer as it came, to be decoded there (user 2026-11-24:
+// the system's Screen Sharing to the same Mac is plainly smoother. Measured
+// that day between two Macs by the same router, some 100 ms and 300 KB a
+// second apart, a page scrolling: 8.3 different pictures a second or more
+// in 70 to 157 KB a second, where the JPEGs made here gave 4.8 in 30 to
+// 400). Nothing of the picture is made here then, and no JPEG. The updates
+// are numbered and said back as an adaptive session's are, and the Mac is
+// asked for what changed next as there: what paces the Mac's coder is then
+// the way to the viewer, as it is for the system's own viewer.
 //
 // own asks for a display of the session's own, which takes the size asked
 // for and follows the viewer's window (Dynamic resolution); the Mac's own
@@ -232,8 +251,11 @@ type hpScreen struct {
 	// picture of tilesPicW by tilesPicH; soft counts those not 0. scaled:
 	// the viewer draws a JPEG smaller than its rectangle over the whole.
 	// perPixel: the bytes a pixel of its rectangle each rung's JPEGs took.
-	adaptive, scaled     bool
-	picMu                sync.Mutex
+	adaptive, scaled bool
+	picMu            sync.Mutex
+	// A coded session (the viewer's open said mvs too): the Mac's own codec,
+	// handed on. codedFirst: its next rectangle is the session's first.
+	coded, codedFirst    bool
 	perPixel             []float64
 	tiles                []int64
 	tileKind             []uint8
@@ -568,6 +590,21 @@ func (p *hpScreen) handler() applehp.Handler {
 			p.rung = pick
 			p.mu.Unlock()
 		},
+		PictureCoded: func(x, y, w, h int, body []byte) {
+			p.picMu.Lock()
+			defer p.picMu.Unlock()
+			flags := byte(hpPieceCoded)
+			if p.codedFirst {
+				p.codedFirst = false
+				flags |= hpPieceFirst
+			}
+			for len(body) > hpCodedPiece {
+				p.pushPiece(x, y, w, h, flags|hpPieceMore, body[:hpCodedPiece])
+				body = body[hpCodedPiece:]
+				flags = hpPieceCoded
+			}
+			p.pushPiece(x, y, w, h, flags, body)
+		},
 		PictureEnd: func() {
 			p.picMu.Lock()
 			serial := p.pushWhole(p.updSoftBytes)
@@ -623,6 +660,12 @@ const (
 	// A picture frame's flags.
 	hpPieceWhole = 1
 	hpPieceJPEG  = 2
+	hpPieceCoded = 4
+	hpPieceFirst = 8
+	hpPieceMore  = 16
+	// A coded rectangle of more bytes than this goes in several pieces: a
+	// frame holds hpFrameMax.
+	hpCodedPiece = 4 << 20
 )
 
 // hpRungs is how a large rectangle goes while the display changes, from the
@@ -888,12 +931,12 @@ func (p *hpScreen) sharpenSome(sess *applehp.Session) {
 	}
 }
 
-// pushWhole queues the word that an update is whole. To an adaptive
-// session's viewer it carries the update's number, which is returned: the
+// pushWhole queues the word that an update is whole. To an adaptive or a
+// coded session's viewer it carries the update's number, which is returned: the
 // viewer says it back once the update is on its screen. soft: how many
 // bytes of the update were JPEGs. Called with picMu held.
 func (p *hpScreen) pushWhole(soft int) uint32 {
-	if !p.adaptive {
+	if !p.adaptive && !p.coded {
 		p.pushPicture(0, 0, 0, 0, hpPieceWhole, nil)
 		return 0
 	}
@@ -1005,6 +1048,7 @@ type hpCommand struct {
 	Standard bool     `json:"standard"`
 	JPEG     bool     `json:"jpeg"`
 	Scaled   bool     `json:"scaled"`
+	Coded    bool     `json:"mvs"`
 	N        uint32   `json:"n"`
 	W        int      `json:"w"`
 	H        int      `json:"h"`
@@ -1149,6 +1193,10 @@ func (p *hpScreen) run(o hpCommand, port int) {
 	base.Curtain = own
 	base.MaxBitrate = kbps * 1000
 	base.Standard = standard
+	// The Mac's own codec for a viewer that reads it, and then no JPEGs.
+	coded := standard && o.JPEG && o.Coded
+	numbered := standard && o.JPEG
+	base.Coded = coded
 	if standard {
 		// What a standard session says of itself is worth a line in the log,
 		// and the viewer is told the first of it: the log is on this Mac, and
@@ -1174,7 +1222,8 @@ func (p *hpScreen) run(o hpCommand, port int) {
 	p.mu.Unlock()
 	// Before any session's pictures: its reader finds it set.
 	p.picMu.Lock()
-	p.adaptive, p.scaled = standard && o.JPEG, standard && o.JPEG && o.Scaled
+	p.adaptive, p.scaled = numbered && !coded, numbered && !coded && o.Scaled
+	p.coded = coded
 	p.picMu.Unlock()
 	p.status(map[string]any{"s": "connecting"})
 	why := "failed"
@@ -1232,6 +1281,9 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		}
 		done := make(chan error, 1)
 		rctx, rcancel := context.WithCancel(p.ctx)
+		p.picMu.Lock()
+		p.codedFirst = true
+		p.picMu.Unlock()
 		p.mu.Lock()
 		p.sess = sess
 		p.route = rctx
@@ -1313,10 +1365,10 @@ func (p *hpScreen) run(o hpCommand, port int) {
 		warnf("screen: stream opened (%s, %dx%d)", rt.name, cw, ch)
 		p.status(map[string]any{"s": "live", "w": sw, "h": sh, "cw": cw, "ch": ch,
 			"own": own, "audio": audio, "input": true, "codec": codec, "standard": standard,
-			"adaptive": standard && o.JPEG})
+			"adaptive": numbered, "mvs": coded})
 		stats := make(chan struct{})
-		go p.stats(sess, stats, standard && o.JPEG)
-		if standard && o.JPEG {
+		go p.stats(sess, stats, numbered, coded)
+		if numbered && !coded {
 			go p.sharpen(sess, stats)
 		}
 		err = <-done
@@ -1340,8 +1392,8 @@ func (p *hpScreen) run(o hpCommand, port int) {
 // not authenticate, sound packets a second, pictures not sent because the
 // viewer was behind, and key frames asked for. Of an adaptive session, the
 // pictures and kilobits are those that went to the viewer, and while any
-// do, a note says how they went.
-func (p *hpScreen) stats(sess *applehp.Session, done <-chan struct{}, adaptive bool) {
+// do, a note says how they went; of a coded one the same.
+func (p *hpScreen) stats(sess *applehp.Session, done <-chan struct{}, adaptive, coded bool) {
 	const every = 2 * time.Second
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -1374,6 +1426,10 @@ func (p *hpScreen) stats(sess *applehp.Session, done <-chan struct{}, adaptive b
 				notes++
 				text := fmt.Sprintf("adaptive: %d KB of JPEG an update, the last large rectangle at 1/%d size, quality %d; an update shown in %d ms at the least, %d ms the last; %.0f a second, %.0f KB a second",
 					budget>>10, rung.scale, rung.quality, base.Milliseconds(), took.Milliseconds(), fps, float64(sent-lastSent)/1024/secs)
+				if coded {
+					text = fmt.Sprintf("adaptive, the Mac's own codec: an update shown in %d ms at the least, %d ms the last; %.1f a second, %.0f KB a second",
+						base.Milliseconds(), took.Milliseconds(), fps, float64(sent-lastSent)/1024/secs)
+				}
 				if b, err := json.Marshal(map[string]any{"s": "note", "text": text}); err == nil {
 					p.push(swToStatus, b)
 				}

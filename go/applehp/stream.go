@@ -11,7 +11,9 @@ package applehp
 //
 // A standard session (Config.Standard) has the control stream alone, and its
 // picture comes there: rectangles of the display's pixels, sent when they
-// change, as RFB has always sent them (Handler.Picture).
+// change, as RFB has always sent them (Handler.Picture). A coded one
+// (Config.Coded) is sent them in the Mac's own codec, and hands them over
+// unread (Handler.PictureCoded).
 
 import (
 	"bytes"
@@ -21,6 +23,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"sort"
@@ -91,6 +94,12 @@ type Handler struct {
 	PictureSize func(w, h int)
 	Picture     func(x, y, w, h int, bgra []byte)
 	PictureEnd  func()
+	// A coded session's picture (Config.Coded): one rectangle as the Mac
+	// sent it in its own codec, what follows its four bytes of length. The
+	// first of a session has no size (the codec's tables). Every one is to
+	// reach the viewer's decoder, in this order. body is the caller's again
+	// once the call returns.
+	PictureCoded func(x, y, w, h int, body []byte)
 }
 
 // Stats is what a running session has counted. VideoBad and AudioBad are
@@ -149,8 +158,12 @@ type runState struct {
 	seen         []byte
 	seenW, seenH int
 	forget       bool
-	// Of the update being read, the rectangles handed over.
-	passed int
+	// Of the update being read, the rectangles handed over; and of a coded
+	// session's, those of them that were byte for byte what the Mac last
+	// sent for the same place (codedLast: a sum of each place's last).
+	passed    int
+	again     int
+	codedLast map[[4]int]uint64
 	// Updates with pixels, those of them with nothing new, and the times the
 	// host was asked for what changes next; how long the next asking waits,
 	// and whether one is waiting.
@@ -912,7 +925,7 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 	said := ""
 	done := func(st parseStatus) (int, parseStatus) {
 		if st != parseMore {
-			rs.passed = 0
+			rs.passed, rs.again = 0, 0
 			for _, e := range evs {
 				e()
 			}
@@ -923,9 +936,14 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 				// (seen 2026-11-24, macOS 27 on Apple silicon: 37 by 26 pixels
 				// of its menu bar), and the viewer drew its window as often.
 				fresh := rs.passed > 0
+				// A coded update that is the last one over again is handed
+				// on like any other (the viewer's decoder is to read all
+				// the Mac sent), and the Mac is asked for the next as after
+				// one with nothing new.
+				news := fresh && rs.again < rs.passed
 				rs.mu.Lock()
 				rs.updates++
-				if fresh {
+				if news {
 					rs.stats.Frames++
 					rs.stats.Bytes += int64(wire)
 					rs.idle = 0
@@ -940,7 +958,7 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 				}
 				if n <= 12 {
 					was := ""
-					if !fresh {
+					if !news {
 						was = ", nothing new in it"
 					}
 					s.cfg.logf("standard: update %d: %s (%d bytes of pixels as sent%s)", n, said, wire, was)
@@ -1025,6 +1043,27 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 					}
 					s.onPixels(rs, h, x, y, w, hh, raw)
 				})
+				pictures, wire = true, wire+zn
+				pos = p + 4 + zn
+			case EncAppleMVS:
+				if !s.cfg.Coded {
+					taken = false
+					break
+				}
+				// Four bytes of length and that many of the codec's own,
+				// which are not read here.
+				if p+4 > len(b) {
+					return 0, parseMore
+				}
+				zn := int(binary.BigEndian.Uint32(b[p : p+4]))
+				if zn > picturePendMax {
+					return done(parseLost)
+				}
+				if p+4+zn > len(b) {
+					return 0, parseMore
+				}
+				coded := b[p+4 : p+4+zn]
+				evs = append(evs, func() { s.onCoded(rs, h, x, y, w, hh, coded) })
 				pictures, wire = true, wire+zn
 				pos = p + 4 + zn
 			case EncApplePointer, EncAppleSelector:
@@ -1190,6 +1229,15 @@ func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte)
 		return
 	}
 	pix := s.pixels.bgra(raw, w*hh)
+	if s.cfg.Coded {
+		// Nothing is kept of what a coded session's viewer has: its picture
+		// is its own decoder's, and pixels the Mac sends exact go as they came.
+		rs.passed++
+		if h.Picture != nil {
+			h.Picture(x, y, w, hh, pix)
+		}
+		return
+	}
 	rs.seenMu.Lock()
 	if rs.seenW != pw || rs.seenH != ph {
 		rs.seen, rs.seenW, rs.seenH = make([]byte, pw*ph*4), pw, ph
@@ -1219,6 +1267,48 @@ func (s *Session) onPixels(rs *runState, h Handler, x, y, w, hh int, raw []byte)
 	rs.passed++
 	if h.Picture != nil {
 		h.Picture(x, y+top, w, end-top, pix[top*w*4:end*w*4])
+	}
+}
+
+// onCoded hands over one rectangle of a coded session's picture as the Mac
+// sent it. Like onPixels, a rectangle past the picture's edge makes the
+// picture that large. Every one is handed over: the viewer's decoder keeps
+// what the Mac's coder keeps, and one left out would leave the two apart.
+func (s *Session) onCoded(rs *runState, h Handler, x, y, w, hh int, body []byte) {
+	if w > 0 && hh > 0 {
+		rs.mu.Lock()
+		pw, ph := max(rs.picW, x+w), max(rs.picH, y+hh)
+		if pw > rs.picW || ph > rs.picH {
+			pw, ph = max(pw, rs.backingW), max(ph, rs.backingH)
+		}
+		rs.mu.Unlock()
+		s.onPictureSize(rs, h, pw, ph)
+	}
+	rs.mu.Lock()
+	fits := rs.picErr == nil && x+w <= rs.picW && y+hh <= rs.picH
+	if fits {
+		rs.stats.Pictures++
+	}
+	rs.mu.Unlock()
+	if !fits {
+		return
+	}
+	// The same bytes for the same place as the last time: very likely the
+	// same pixels (a Mac asked for what changes next sends a place it has
+	// sent, again and again). Only how soon the Mac is asked again goes by it.
+	sum := fnv.New64a()
+	sum.Write(body)
+	at, now := [4]int{x, y, w, hh}, sum.Sum64()
+	if was, ok := rs.codedLast[at]; ok && was == now && len(body) > 0 && body[0] == 0 {
+		rs.again++
+	}
+	if rs.codedLast == nil || len(rs.codedLast) > 512 {
+		rs.codedLast = map[[4]int]uint64{}
+	}
+	rs.codedLast[at] = now
+	rs.passed++
+	if h.PictureCoded != nil {
+		h.PictureCoded(x, y, w, hh, body)
 	}
 }
 
