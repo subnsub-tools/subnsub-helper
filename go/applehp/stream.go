@@ -61,6 +61,12 @@ const (
 	// has, the asking waits, longer each time, between these two.
 	askIdleMin = 30 * time.Millisecond
 	askIdleMax = 250 * time.Millisecond
+	// The same for a coded session after an update that was the last one
+	// over again: the Mac sends nothing by itself (seen 2026-11-24 on macOS
+	// 27 with nothing asked: an update every two seconds), so what it shows
+	// after the viewer's click or wheel comes no sooner than the next
+	// asking, and Screen Sharing's own viewer asks about once a round trip.
+	askIdleCoded = 60 * time.Millisecond
 	// One picture, as packets: beyond either it is not a picture, and is
 	// dropped whole.
 	videoFrameMax   = 6 << 20
@@ -90,7 +96,8 @@ type Handler struct {
 	// A standard session's picture. PictureSize: the whole picture's size in
 	// pixels, before its first rectangle and whenever it changes. Picture:
 	// the pixels of one rectangle (BGRA rows, none transparent).
-	// PictureEnd: the rectangles of one update have all been handed over.
+	// PictureEnd: the rectangles of one update have all been handed over
+	// (not said of a coded update that only repeated the one before it).
 	PictureSize func(w, h int)
 	Picture     func(x, y, w, h int, bgra []byte)
 	PictureEnd  func()
@@ -949,11 +956,18 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 					rs.idle = 0
 				} else {
 					rs.stale++
-					rs.idle = min(max(2*rs.idle, askIdleMin), askIdleMax)
+					most := askIdleMax
+					if fresh {
+						most = askIdleCoded
+					}
+					rs.idle = min(max(2*rs.idle, askIdleMin), most)
 				}
 				n, wait, pw, ph := rs.updates, rs.idle, rs.picW, rs.picH
 				rs.mu.Unlock()
-				if fresh && h.PictureEnd != nil {
+				// Not after a coded update that was the last one over
+				// again: its rectangles went on, and the viewer has nothing
+				// new to show for them.
+				if news && h.PictureEnd != nil {
 					h.PictureEnd()
 				}
 				if n <= 12 {
