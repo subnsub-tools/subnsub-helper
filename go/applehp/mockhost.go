@@ -51,8 +51,12 @@ type MockHost struct {
 	// The stream: parameter sets, then access units (each a list of NAL
 	// units, the first a key frame), sent round and round at FPS.
 	SPS, PPS []byte
-	Frames   [][][]byte
-	FPS      int
+	// HEVC sends the stream as HEVC (RFC 7798, as a Mac asked for "hevc"
+	// does), with VPS as its video parameter set; otherwise as H.264.
+	HEVC   bool
+	VPS    []byte
+	Frames [][][]byte
+	FPS    int
 	// Audio payloads, one every AudioEvery, round and round; none sends none.
 	Audio      [][]byte
 	AudioEvery time.Duration
@@ -836,14 +840,23 @@ func (m *MockHost) stream(to net.IP, videoKey, audioKey []byte, stop chan struct
 		<-stop
 		return
 	}
-	avcc := []byte{1, m.SPS[1], m.SPS[2], m.SPS[3], 0xff, 0xe1}
-	avcc = binary.BigEndian.AppendUint16(avcc, uint16(len(m.SPS)))
-	avcc = append(avcc, m.SPS...)
-	avcc = append(avcc, 1)
-	avcc = binary.BigEndian.AppendUint16(avcc, uint16(len(m.PPS)))
-	avcc = append(avcc, m.PPS...)
-	cfg := append([]byte{AppleAVCConfigMarker, 0, 0, 0}, []byte("avc1avcC")...)
-	cfg = append(cfg, avcc...)
+	var cfg []byte
+	if m.HEVC {
+		cfg = []byte{HEVCNALAP << 1, 1}
+		for _, u := range [][]byte{m.VPS, m.SPS, m.PPS} {
+			cfg = binary.BigEndian.AppendUint16(cfg, uint16(len(u)))
+			cfg = append(cfg, u...)
+		}
+	} else {
+		avcc := []byte{1, m.SPS[1], m.SPS[2], m.SPS[3], 0xff, 0xe1}
+		avcc = binary.BigEndian.AppendUint16(avcc, uint16(len(m.SPS)))
+		avcc = append(avcc, m.SPS...)
+		avcc = append(avcc, 1)
+		avcc = binary.BigEndian.AppendUint16(avcc, uint16(len(m.PPS)))
+		avcc = append(avcc, m.PPS...)
+		cfg = append([]byte{AppleAVCConfigMarker, 0, 0, 0}, []byte("avc1avcC")...)
+		cfg = append(cfg, avcc...)
+	}
 	const mtu = 1100
 	t := time.NewTicker(time.Second / time.Duration(m.FPS))
 	defer t.Stop()
@@ -865,6 +878,24 @@ func (m *MockHost) stream(to net.IP, videoKey, audioKey []byte, stop chan struct
 			}
 			if len(nal) <= mtu {
 				pkts = append(pkts, nal)
+				continue
+			}
+			if m.HEVC {
+				typ := HEVCNALType(nal[0])
+				h0, h1 := nal[0]&0x81|HEVCNALFU<<1, nal[1]
+				rest := nal[2:]
+				for first := true; len(rest) > 0; first = false {
+					n := min(len(rest), mtu)
+					fh := typ
+					if first {
+						fh |= 0x80
+					}
+					if n == len(rest) {
+						fh |= 0x40
+					}
+					pkts = append(pkts, append([]byte{h0, h1, fh}, rest[:n]...))
+					rest = rest[n:]
+				}
 				continue
 			}
 			ind := nal[0]&0xe0 | H264NALFUA

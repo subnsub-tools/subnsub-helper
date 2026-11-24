@@ -30,7 +30,9 @@ package main
 //	                  input}, stats every two seconds {fps, kbps, lost,
 //	                  keyframes, bad, audio, dropped, asks}, end {why: auth, no-vnc (Screen Sharing is
 //	                  off), no-hp, no-media, busy, failed, closed}
-//	                2 video configuration: codec (1, H.264), then avcC
+//	                2 video configuration: codec (2, HEVC), then hvcC
+//	                  (High Performance is HEVC only, user 2026-11-25:
+//	                  only H.265, no H.264; one tile a picture)
 //	                3 video frame: flags (1 = key), timestamp (90 kHz),
 //	                  then [length u32][NAL unit] for each unit
 //	                4 audio packet: codec (3, AAC-ELD: 48 kHz, two
@@ -145,6 +147,7 @@ import (
 	"os/exec"
 	"os/user"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -171,8 +174,8 @@ const (
 	swFromKey     = 3
 	swFromScroll  = 4
 
-	swCodecAVC = 1
-	swAudioELD = 3
+	swCodecHEVC = 2
+	swAudioELD  = 3
 
 	// What waits for the viewer: this many frames in all, of which video may
 	// take this many before the newest are dropped instead.
@@ -362,31 +365,12 @@ func (p *hpScreen) pushLayout(body []byte) {
 	}
 }
 
-// hpAvcC is the decoder configuration for an H.264 stream.
-func hpAvcC(sps, pps []byte) []byte {
-	if len(sps) < 4 || len(pps) == 0 {
-		return nil
-	}
-	b := []byte{1, sps[1], sps[2], sps[3], 0xff, 0xe1}
-	b = binary.BigEndian.AppendUint16(b, uint16(len(sps)))
-	b = append(b, sps...)
-	b = append(b, 1)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(pps)))
-	b = append(b, pps...)
-	switch sps[1] {
-	case 100, 110, 122, 144:
-		// The high profiles name their chroma and depth: 4:2:0, 8 bits.
-		b = append(b, 0xfd, 0xf8, 0xf8, 0)
-	}
-	return b
-}
-
 func (p *hpScreen) handler() applehp.Handler {
 	return applehp.Handler{
-		VideoConfig: func(sps, pps []byte) {
-			if c := hpAvcC(sps, pps); c != nil {
+		HEVCConfig: func(vps, sps, pps []byte) {
+			if c := applehp.HEVCDecoderRecord(vps, sps, pps); c != nil {
 				p.mu.Lock()
-				p.conf = append([]byte{swCodecAVC}, c...)
+				p.conf = append([]byte{swCodecHEVC}, c...)
 				p.mu.Unlock()
 			}
 		},
@@ -425,7 +409,7 @@ func (p *hpScreen) handler() applehp.Handler {
 				}
 				// Parameter sets travel in the configuration; a delimiter is
 				// nothing a decoder needs.
-				if t := u[0] & 0x1f; t == 7 || t == 8 || t == 9 {
+				if t := applehp.HEVCNALType(u[0]); t >= applehp.HEVCNALVPS && t <= applehp.HEVCNALAUD {
 					continue
 				}
 				b = binary.BigEndian.AppendUint32(b, uint32(len(u)))
@@ -1195,6 +1179,16 @@ func hpStandardRoutes(routes []hpRoute) []hpRoute {
 	return append(lo, rest...)
 }
 
+// hpCodecs is what a High Performance session here is sent in: HEVC on a Mac
+// with Apple silicon, and nothing (no High Performance) on an Intel Mac,
+// whose Screen Sharing declines HEVC (a 2018 Mac mini, 2026-11-22).
+func hpCodecs() []string {
+	if hpOwnHere() {
+		return []string{"hevc"}
+	}
+	return []string{}
+}
+
 // hpConnect is applehp.Connect, and hpRouteList the routes it is tried on;
 // a test puts its own in.
 var (
@@ -1230,7 +1224,16 @@ func (p *hpScreen) run(o hpCommand, port int) {
 	// (hpOwnDisplayHere); elsewhere the session shows the Mac's display as
 	// it is, and live says so. A standard session shows the Mac's display.
 	own := o.Own && !standard && hpOwnHere()
+	// High Performance is HEVC, one tile a picture, and nothing else (user
+	// 2026-11-25: only H.265, H.264 not allowed): a viewer that does not
+	// take HEVC has the standard kind or nothing.
+	if !standard && !slices.Contains(o.Codecs, "hevc") {
+		p.status(map[string]any{"s": "end", "why": "no-hp"})
+		return
+	}
 	base := applehp.DefaultConfig()
+	base.Codec = "hevc"
+	base.TilesPerFrame = 1
 	base.Port = port
 	base.Username = name
 	base.Password = o.Password
@@ -1391,7 +1394,7 @@ func (p *hpScreen) run(o hpCommand, port int) {
 			why = "no-media"
 			continue
 		}
-		codec := "avc"
+		codec := "hevc"
 		cw, ch, _ := sess.Canvas()
 		if standard {
 			codec = "pixels"
@@ -1684,7 +1687,7 @@ func hpHello() []byte {
 		name = u.Username
 	}
 	b, _ := json.Marshal(map[string]any{"s": "hello", "v": 3, "name": hpComputerName(), "user": name,
-		"codecs": []string{"avc"}, "signin": true, "standard": true, "own": hpOwnHere()})
+		"codecs": hpCodecs(), "signin": true, "standard": true, "own": hpOwnHere()})
 	return b
 }
 

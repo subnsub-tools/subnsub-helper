@@ -19,7 +19,7 @@ func TestScreenHPRealMac(t *testing.T) {
 	t.Setenv(screenHPEnvVar, "on")
 	v, done := newHPViewer(t, screenPort())
 	v.status(5 * time.Second)
-	v.control(map[string]any{"t": "open", "codecs": []string{"avc"}, "user": user, "password": os.Getenv("MON_HP_REAL_PASSWORD"), "audio": true})
+	v.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": user, "password": os.Getenv("MON_HP_REAL_PASSWORD"), "audio": true})
 	frames, sound, configs := 0, 0, 0
 	var live map[string]any
 	deadline := time.After(60 * time.Second)

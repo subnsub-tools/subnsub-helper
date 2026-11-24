@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -18,10 +19,12 @@ import (
 // twin and the one after are free, where a stream session's sockets go.
 func hpMock(t *testing.T, password string) *applehp.MockHost {
 	t.Helper()
-	sps := []byte{0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40, 0x50, 0x05, 0xbb, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03, 0x03, 0xc0, 0xf1, 0x83, 0x19, 0x60}
-	pps := []byte{0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0}
-	idr := append([]byte{0x65, 0x88}, bytes.Repeat([]byte{0xab}, 4000)...)
-	p := append([]byte{0x41, 0xe0}, bytes.Repeat([]byte{0xcd}, 200)...)
+	// HEVC as an M1 Pro's Screen Sharing sent it (2026-11-25).
+	vps, _ := hex.DecodeString("40010c01ffff040800000300be080000030000961b0240")
+	sps, _ := hex.DecodeString("420101040800000300be080000030000969000384400498f8fc40ddc8a465cfe27e17f437ea5370c0d010080")
+	pps, _ := hex.DecodeString("4401c072f05b24")
+	idr := append([]byte{20 << 1, 0x01}, bytes.Repeat([]byte{0xab}, 4000)...)
+	p := append([]byte{1 << 1, 0x01}, bytes.Repeat([]byte{0xcd}, 200)...)
 	for i := 0; i < 40; i++ {
 		u, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
@@ -34,7 +37,7 @@ func hpMock(t *testing.T, password string) *applehp.MockHost {
 			continue
 		}
 		u2.Close()
-		h := &applehp.MockHost{Username: "alice", Password: password, Width: 1280, Height: 720, SPS: sps, PPS: pps,
+		h := &applehp.MockHost{Username: "alice", Password: password, Width: 1280, Height: 720, HEVC: true, VPS: vps, SPS: sps, PPS: pps,
 			Frames: [][][]byte{{idr}, {p}, {p}, {p}, {p}, {p}, {p}, {p}}, FPS: 30, Audio: [][]byte{{1, 2, 3}}}
 		if err := h.Listen("127.0.0.1:" + strconv.Itoa(port)); err != nil {
 			continue
@@ -186,13 +189,13 @@ func TestScreenHPSession(t *testing.T) {
 					t.Fatalf("the session ended: %v", m)
 				case "live":
 					live = true
-					if m["w"].(float64) != 1280 || m["cw"].(float64) != 1280 || m["codec"] != "avc" || m["input"] != true {
+					if m["w"].(float64) != 1280 || m["cw"].(float64) != 1280 || m["codec"] != "hevc" || m["input"] != true {
 						t.Fatalf("live says %v", m)
 					}
 				}
 			case swToVideoConfig:
 				config = f.body
-				if len(config) < 8 || config[0] != swCodecAVC || config[1] != 1 {
+				if len(config) < 8 || config[0] != swCodecHEVC || config[1] != 1 {
 					t.Fatalf("configuration %x", config)
 				}
 			case swToVideoFrame:
@@ -294,6 +297,34 @@ func TestScreenHPSession(t *testing.T) {
 	}
 }
 
+// High Performance is HEVC or nothing: a viewer that does not take it is
+// told so before anything is asked of the Mac.
+func TestScreenHPOnlyHEVC(t *testing.T) {
+	t.Setenv(screenHPEnvVar, "on")
+	hpLoopbackOnly(t)
+	host := hpMock(t, "pw")
+	for _, codecs := range [][]string{{"avc"}, nil} {
+		v, _ := newHPViewer(t, host.Port())
+		hello := v.status(5 * time.Second)
+		if c, _ := hello["codecs"].([]any); len(c) != 1 || c[0] != "hevc" {
+			t.Fatalf("hello offers %v", hello["codecs"])
+		}
+		v.control(map[string]any{"t": "open", "codecs": codecs, "user": "alice", "password": "pw"})
+		for {
+			m := v.status(10 * time.Second)
+			if m["s"] == "end" {
+				if m["why"] != "no-hp" {
+					t.Fatalf("codecs %v ended with %v", codecs, m)
+				}
+				break
+			}
+			if m["s"] == "live" {
+				t.Fatalf("codecs %v went live", codecs)
+			}
+		}
+	}
+}
+
 // A wrong password is told as such, and a second viewer while one is
 // watching is told the Mac is busy.
 func TestScreenHPAuthAndBusy(t *testing.T) {
@@ -303,7 +334,7 @@ func TestScreenHPAuthAndBusy(t *testing.T) {
 
 	bad, badDone := newHPViewer(t, host.Port())
 	bad.status(5 * time.Second)
-	bad.control(map[string]any{"t": "open", "user": "alice", "password": "nope"})
+	bad.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": "alice", "password": "nope"})
 	for {
 		m := bad.status(30 * time.Second)
 		if m["s"] == "end" {
@@ -317,7 +348,7 @@ func TestScreenHPAuthAndBusy(t *testing.T) {
 
 	first, firstDone := newHPViewer(t, host.Port())
 	first.status(5 * time.Second)
-	first.control(map[string]any{"t": "open", "user": "alice", "password": "pw"})
+	first.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": "alice", "password": "pw"})
 	for {
 		m := first.status(30 * time.Second)
 		if m["s"] == "live" {
@@ -333,7 +364,7 @@ func TestScreenHPAuthAndBusy(t *testing.T) {
 	}()
 	second, secondDone := newHPViewer(t, host.Port())
 	second.status(5 * time.Second)
-	second.control(map[string]any{"t": "open", "user": "alice", "password": "pw"})
+	second.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": "alice", "password": "pw"})
 	if m := second.status(10 * time.Second); m["s"] != "end" || m["why"] != "busy" {
 		t.Fatalf("a second session got %v", m)
 	}
@@ -350,7 +381,7 @@ func TestScreenHPStats(t *testing.T) {
 	host := hpMock(t, "pw")
 	v, done := newHPViewer(t, host.Port())
 	v.status(5 * time.Second)
-	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw"})
+	v.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": "alice", "password": "pw"})
 	for {
 		m := v.status(30 * time.Second)
 		if m["s"] == "end" {
@@ -409,7 +440,7 @@ func TestScreenHPClipboardAnyText(t *testing.T) {
 	host := hpMock(t, "pw")
 	v, done := newHPViewer(t, host.Port())
 	v.status(5 * time.Second)
-	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw"})
+	v.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": "alice", "password": "pw"})
 	for {
 		m := v.status(30 * time.Second)
 		if m["s"] == "live" {
@@ -457,7 +488,7 @@ func TestScreenHPSizeWhileSigningIn(t *testing.T) {
 	host := hpMock(t, "pw")
 	v, done := newHPViewer(t, host.Port())
 	v.status(5 * time.Second)
-	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw", "own": true, "w": 1000, "h": 600, "scale": 1})
+	v.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": "alice", "password": "pw", "own": true, "w": 1000, "h": 600, "scale": 1})
 	v.control(map[string]any{"t": "size", "w": 1200, "h": 700, "scale": 2})
 	want, got := [4]int{1200, 700, 2400, 1400}, [4]int{}
 	deadline := time.After(45 * time.Second)
@@ -508,7 +539,7 @@ func TestScreenHPOwnDisplay(t *testing.T) {
 	host := hpMock(t, "pw")
 	v, done := newHPViewer(t, host.Port())
 	v.status(5 * time.Second)
-	v.control(map[string]any{"t": "open", "user": "alice", "password": "pw", "own": true, "w": 1000, "h": 600, "scale": 2})
+	v.control(map[string]any{"t": "open", "codecs": []string{"hevc"}, "user": "alice", "password": "pw", "own": true, "w": 1000, "h": 600, "scale": 2})
 	layout := func(want [4]int, within time.Duration) map[string]any {
 		t.Helper()
 		var live map[string]any

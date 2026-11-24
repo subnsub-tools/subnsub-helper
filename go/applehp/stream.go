@@ -74,6 +74,10 @@ type Handler struct {
 	// its reference count raised to what the host really uses): every frame
 	// from the next key frame on is decoded with these.
 	VideoConfig func(sps, pps []byte)
+	// An HEVC stream's parameter sets changed (Config.Codec "hevc"): every
+	// frame from the next key frame on is decoded with these. An HEVC stream
+	// has no VideoConfig.
+	HEVCConfig func(vps, sps, pps []byte)
 	// One access unit, complete, as NAL units without start codes.
 	VideoFrame func(ts uint32, key bool, nalus [][]byte)
 	// One audio packet's payload as the host sent it, and its payload type.
@@ -1537,11 +1541,11 @@ type videoGroup struct {
 }
 
 type videoAssembler struct {
-	cur      *videoGroup
-	sps, pps []byte
-	sent     bool // the parameter sets in force have been handed over
-	nextSeq  map[uint32]uint16
-	haveSeq  map[uint32]bool
+	cur           *videoGroup
+	vps, sps, pps []byte
+	sent          bool // the parameter sets in force have been handed over
+	nextSeq       map[uint32]uint16
+	haveSeq       map[uint32]bool
 }
 
 func (s *Session) readVideo(ctx context.Context, rs *runState, h Handler) error {
@@ -1638,6 +1642,10 @@ func (s *Session) flushVideo(va *videoAssembler, rs *runState, h Handler) {
 		rs.mu.Unlock()
 		return
 	}
+	if isHEVC(s.cfg.Codec) {
+		s.handHEVC(va, rs, h, g, whole)
+		return
+	}
 
 	payloads := make([][]byte, 0, len(g.packets))
 	for _, p := range g.packets {
@@ -1684,6 +1692,68 @@ func (s *Session) flushVideo(va *videoAssembler, rs *runState, h Handler) {
 		va.sent = true
 		if h.VideoConfig != nil {
 			h.VideoConfig(append([]byte(nil), va.sps...), append([]byte(nil), va.pps...))
+		}
+	}
+	if h.VideoFrame != nil {
+		h.VideoFrame(g.ts, key, nalus)
+	}
+}
+
+// handHEVC hands over an HEVC access unit: its parameter sets first when
+// they are new and it is a key frame, then the unit itself.
+func (s *Session) handHEVC(va *videoAssembler, rs *runState, h Handler, g *videoGroup, whole bool) {
+	payloads := make([][]byte, 0, len(g.packets))
+	for _, p := range g.packets {
+		payloads = append(payloads, p.payload)
+	}
+	nalus := ReassembleHEVC(payloads)
+	if len(nalus) == 0 {
+		return
+	}
+	key := false
+	for _, u := range nalus {
+		var set *[]byte
+		switch t := HEVCNALType(u[0]); {
+		case t == HEVCNALVPS:
+			set = &va.vps
+		case t == HEVCNALSPS:
+			set = &va.sps
+		case t == HEVCNALPPS:
+			set = &va.pps
+		case HEVCIsKey(t):
+			key = true
+		}
+		if set != nil && !bytes.Equal(*set, u) {
+			*set = u
+			va.sent = false
+		}
+	}
+	rs.mu.Lock()
+	if !whole {
+		rs.stats.FramesLost++
+		rs.awaitKey = true
+		rs.mu.Unlock()
+		return
+	}
+	if rs.awaitKey && !key {
+		rs.mu.Unlock()
+		return
+	}
+	if key && (len(va.vps) == 0 || len(va.sps) == 0 || len(va.pps) == 0) {
+		// A key frame before the parameter sets cannot be decoded by anyone.
+		rs.mu.Unlock()
+		return
+	}
+	rs.awaitKey = false
+	rs.stats.Frames++
+	if key {
+		rs.stats.Keyframes++
+	}
+	rs.mu.Unlock()
+	if key && !va.sent {
+		va.sent = true
+		if h.HEVCConfig != nil {
+			h.HEVCConfig(append([]byte(nil), va.vps...), append([]byte(nil), va.sps...), append([]byte(nil), va.pps...))
 		}
 	}
 	if h.VideoFrame != nil {
