@@ -23,7 +23,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"net"
 	"sort"
@@ -61,12 +60,6 @@ const (
 	// has, the asking waits, longer each time, between these two.
 	askIdleMin = 30 * time.Millisecond
 	askIdleMax = 250 * time.Millisecond
-	// The same for a coded session after an update that was the last one
-	// over again: the Mac sends nothing by itself (seen 2026-11-24 on macOS
-	// 27 with nothing asked: an update every two seconds), so what it shows
-	// after the viewer's click or wheel comes no sooner than the next
-	// asking, and Screen Sharing's own viewer asks about once a round trip.
-	askIdleCoded = 60 * time.Millisecond
 	// One picture, as packets: beyond either it is not a picture, and is
 	// dropped whole.
 	videoFrameMax   = 6 << 20
@@ -96,8 +89,7 @@ type Handler struct {
 	// A standard session's picture. PictureSize: the whole picture's size in
 	// pixels, before its first rectangle and whenever it changes. Picture:
 	// the pixels of one rectangle (BGRA rows, none transparent).
-	// PictureEnd: the rectangles of one update have all been handed over
-	// (not said of a coded update that only repeated the one before it).
+	// PictureEnd: the rectangles of one update have all been handed over.
 	PictureSize func(w, h int)
 	Picture     func(x, y, w, h int, bgra []byte)
 	PictureEnd  func()
@@ -165,12 +157,8 @@ type runState struct {
 	seen         []byte
 	seenW, seenH int
 	forget       bool
-	// Of the update being read, the rectangles handed over; and of a coded
-	// session's, those of them that were byte for byte what the Mac last
-	// sent for the same place (codedLast: a sum of each place's last).
-	passed    int
-	again     int
-	codedLast map[[4]int]uint64
+	// Of the update being read, the rectangles handed over.
+	passed int
 	// Updates with pixels, those of them with nothing new, and the times the
 	// host was asked for what changes next; how long the next asking waits,
 	// and whether one is waiting.
@@ -452,14 +440,15 @@ func (s *Session) askNext(rs *runState, wait time.Duration, w, h int) {
 
 // SendPointer is a pointer event: the buttons held as Screen Sharing counts
 // them (bit 0 left, 1 right, 2 middle; 3 and 4 one notch of the wheel up and
-// down, 5 and 6 left and right) and where, in the display's points. On a
-// display of the session's own the host takes it in the display's pixels: on
-// one of 1024x578 points at 2048x1156 pixels, 400,300 sent as it is put the
-// pointer at 200,150 points (seen 2026-11-22, macOS 15.8.3, read there with
-// CGEventGetLocation). The Mac's own display at more than a pixel a point has
-// not been measured, and is sent the points as before.
+// down, 5 and 6 left and right) and where, in the display's points. The host
+// takes it in the display's pixels: on a display of the session's own of
+// 1024x578 points at 2048x1156 pixels, 400,300 sent as it is put the pointer
+// at 200,150 points (seen 2026-11-22, macOS 15.8.3, read there with
+// CGEventGetLocation); and on a Mac's own display of 1800x1169 points at
+// 3600x2338 pixels, in a standard session, 300,300 put it at 150,150 (seen
+// 2026-11-24, macOS 27, read there with NSEvent's mouse location).
 func (s *Session) SendPointer(mask byte, x, y int) error {
-	if sw, sh, bw, bh := s.Layout(); s.ownDisplay() && sw > 0 && sh > 0 && bw > sw && bh > sh {
+	if sw, sh, bw, bh := s.Layout(); sw > 0 && sh > 0 && bw > sw && bh > sh {
 		// The middle of the point.
 		x, y = (2*x+1)*bw/(2*sw), (2*y+1)*bh/(2*sh)
 	}
@@ -932,7 +921,7 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 	said := ""
 	done := func(st parseStatus) (int, parseStatus) {
 		if st != parseMore {
-			rs.passed, rs.again = 0, 0
+			rs.passed = 0
 			for _, e := range evs {
 				e()
 			}
@@ -942,37 +931,33 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 				// once with a rectangle it has sent, some fifty times a second
 				// (seen 2026-11-24, macOS 27 on Apple silicon: 37 by 26 pixels
 				// of its menu bar), and the viewer drew its window as often.
+				// Every rectangle of a coded update is handed over (the
+				// viewer's decoder is to read all the Mac sent), so a coded
+				// update is always fresh, and the Mac is asked again at
+				// once: it answers each asking with one changed place, the
+				// oldest, and keeps the rest in order (screensharingd, read
+				// 2026-11-24), so a place that just changed, such as an icon
+				// clicked, waits behind the others for as many askings.
+				// What paces a coded session is PictureEnd.
 				fresh := rs.passed > 0
-				// A coded update that is the last one over again is handed
-				// on like any other (the viewer's decoder is to read all
-				// the Mac sent), and the Mac is asked for the next as after
-				// one with nothing new.
-				news := fresh && rs.again < rs.passed
 				rs.mu.Lock()
 				rs.updates++
-				if news {
+				if fresh {
 					rs.stats.Frames++
 					rs.stats.Bytes += int64(wire)
 					rs.idle = 0
 				} else {
 					rs.stale++
-					most := askIdleMax
-					if fresh {
-						most = askIdleCoded
-					}
-					rs.idle = min(max(2*rs.idle, askIdleMin), most)
+					rs.idle = min(max(2*rs.idle, askIdleMin), askIdleMax)
 				}
 				n, wait, pw, ph := rs.updates, rs.idle, rs.picW, rs.picH
 				rs.mu.Unlock()
-				// Not after a coded update that was the last one over
-				// again: its rectangles went on, and the viewer has nothing
-				// new to show for them.
-				if news && h.PictureEnd != nil {
+				if fresh && h.PictureEnd != nil {
 					h.PictureEnd()
 				}
 				if n <= 12 {
 					was := ""
-					if !news {
+					if !fresh {
 						was = ", nothing new in it"
 					}
 					s.cfg.logf("standard: update %d: %s (%d bytes of pixels as sent%s)", n, said, wire, was)
@@ -980,6 +965,14 @@ func (s *Session) parseUpdate(b []byte, rs *runState, h Handler) (int, parseStat
 				// What changes next, asked for as any RFB viewer asks. The
 				// host's own sending (arm) may bring the same.
 				s.askNext(rs, wait, pw, ph)
+			} else if s.cfg.Coded && st == parseOK {
+				// An update of the pointer's shape or the layout alone may
+				// have been the answer to the last asking; one asking more
+				// costs nothing (the Mac keeps one, however many came).
+				rs.mu.Lock()
+				pw, ph := rs.picW, rs.picH
+				rs.mu.Unlock()
+				s.askNext(rs, 0, pw, ph)
 			}
 		}
 		return pos, st
@@ -1307,19 +1300,6 @@ func (s *Session) onCoded(rs *runState, h Handler, x, y, w, hh int, body []byte)
 	if !fits {
 		return
 	}
-	// The same bytes for the same place as the last time: very likely the
-	// same pixels (a Mac asked for what changes next sends a place it has
-	// sent, again and again). Only how soon the Mac is asked again goes by it.
-	sum := fnv.New64a()
-	sum.Write(body)
-	at, now := [4]int{x, y, w, hh}, sum.Sum64()
-	if was, ok := rs.codedLast[at]; ok && was == now && len(body) > 0 && body[0] == 0 {
-		rs.again++
-	}
-	if rs.codedLast == nil || len(rs.codedLast) > 512 {
-		rs.codedLast = map[[4]int]uint64{}
-	}
-	rs.codedLast[at] = now
 	rs.passed++
 	if h.PictureCoded != nil {
 		h.PictureCoded(x, y, w, hh, body)

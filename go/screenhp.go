@@ -110,9 +110,16 @@ package main
 // second apart, a page scrolling: 8.3 different pictures a second or more
 // in 70 to 157 KB a second, where the JPEGs made here gave 4.8 in 30 to
 // 400). Nothing of the picture is made here then, and no JPEG. The updates
-// are numbered and said back as an adaptive session's are, and the Mac is
-// asked for what changed next as there: what paces the Mac's coder is then
-// the way to the viewer, as it is for the system's own viewer.
+// are numbered and said back as an adaptive session's are. The Mac sends a
+// changed place for each asking, the oldest first, and is asked again at
+// once while fewer than hpCodedAhead updates and no more than hpCodedBytes
+// are on their way to the viewer: small places go many to a round trip, a
+// whole display one at a time (user 2026-11-24, measured that day: with
+// three updates on the way and a pause after one that repeated the last, a
+// click on m2 showed 0.4 to 0.6 s after the press where the system's viewer
+// took 0.1). Its own viewer has the Mac send changed places unasked, paced
+// by how fast it reads; this helper reads on this Mac, where that pacing
+// would let the Mac queue far more than the way to the viewer carries.
 //
 // own asks for a display of the session's own, which takes the size asked
 // for and follows the viewer's window (Dynamic resolution); the Mac's own
@@ -262,7 +269,8 @@ type hpScreen struct {
 	tilesW, tilesH       int
 	tilesPicW, tilesPicH int
 	soft                 int
-	// Of the update being sent: how many bytes of it went as JPEGs.
+	// Of the update being sent: how many bytes of it went as JPEGs, or of a
+	// coded session's, in the Mac's codec.
 	updSoftBytes int
 	// With mu, from here. The number of the last update sent whole and the
 	// last the viewer said it has shown, and a word each time it says so.
@@ -593,6 +601,7 @@ func (p *hpScreen) handler() applehp.Handler {
 		PictureCoded: func(x, y, w, h int, body []byte) {
 			p.picMu.Lock()
 			defer p.picMu.Unlock()
+			p.updSoftBytes += len(body)
 			flags := byte(hpPieceCoded)
 			if p.codedFirst {
 				p.codedFirst = false
@@ -609,9 +618,10 @@ func (p *hpScreen) handler() applehp.Handler {
 			p.picMu.Lock()
 			serial := p.pushWhole(p.updSoftBytes)
 			p.updSoftBytes = 0
+			coded := p.coded
 			p.picMu.Unlock()
 			if serial != 0 {
-				p.awaitShown(serial)
+				p.awaitShown(serial, coded)
 			}
 		},
 	}
@@ -666,6 +676,13 @@ const (
 	// A coded rectangle of more bytes than this goes in several pieces: a
 	// frame holds hpFrameMax.
 	hpCodedPiece = 4 << 20
+	// A coded session asks for what changed next while fewer than
+	// hpCodedAhead updates, and no more than hpCodedBytes of them, are on
+	// their way to the viewer's screen (or none at all, however large).
+	// Each update is one changed place (applehp.Session's asking); small
+	// ones, a letter or an icon's highlight, go many to a round trip.
+	hpCodedAhead = 16
+	hpCodedBytes = 32 << 10
 )
 
 // hpRungs is how a large rectangle goes while the display changes, from the
@@ -762,7 +779,10 @@ func (p *hpScreen) wentSoft(x, y, w, h int, kind uint8) {
 // that the Mac is asked for what changed next no sooner: what it then sends
 // is the display as it is by then. More than one on the way keeps the
 // pictures coming where the viewer's word takes long to come back.
-func (p *hpScreen) awaitShown(serial uint32) {
+//
+// A coded session's updates are a changed place each: there it waits while
+// hpCodedAhead of them, or more than hpCodedBytes, are on their way.
+func (p *hpScreen) awaitShown(serial uint32, coded bool) {
 	p.mu.Lock()
 	ctx := p.route
 	p.mu.Unlock()
@@ -774,6 +794,9 @@ func (p *hpScreen) awaitShown(serial uint32) {
 	for {
 		p.mu.Lock()
 		ahead := p.shown >= serial || serial-p.shown < hpShownAhead
+		if coded {
+			ahead = p.shown >= serial || (serial-p.shown < hpCodedAhead && p.inFlight(serial) <= hpCodedBytes)
+		}
 		p.mu.Unlock()
 		if ahead {
 			return
@@ -790,6 +813,22 @@ func (p *hpScreen) awaitShown(serial uint32) {
 			return
 		}
 	}
+}
+
+// inFlight is how many bytes of the updates after the last one shown, up to
+// serial, are still on their way to the viewer's screen (of those numbers
+// sentSoft still holds). Called with mu held.
+func (p *hpScreen) inFlight(serial uint32) int {
+	ring := uint32(len(p.sentSoft))
+	k := p.shown + 1
+	if serial-p.shown > ring {
+		k = serial - ring + 1
+	}
+	n := 0
+	for ; k <= serial; k++ {
+		n += p.sentSoft[k%ring]
+	}
+	return n
 }
 
 // wasShown is the viewer saying the update of this number is on its screen.
