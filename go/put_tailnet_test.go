@@ -352,10 +352,10 @@ func TestPutTailnetAfterHandshake(t *testing.T) {
 	}
 }
 
-// A Mac that is not on a tailnet itself calls a peer's door there once the
-// door has been seen to take a connection from it (a router carries it), and
-// not before; a door that takes none is left alone, and a stream does not
-// wait for it to be found out.
+// A Mac that is not on a tailnet itself calls a peer's door there while the
+// door is seen to take a connection from it (a router carries it); a door
+// that takes none is left alone; a stream waits at most putTnQuickWait for a
+// door not tried lately; and a "no" found out long ago is not believed.
 func TestPutTailnetBehindRouter(t *testing.T) {
 	f := newPutFixture(t)
 	putTnReset(t)
@@ -364,19 +364,19 @@ func TestPutTailnetBehindRouter(t *testing.T) {
 	t.Cleanup(func() { tailnetRoad.Store(was) })
 	b := putTnPair(t, f, key.NodePublic{})
 	start := time.Now()
-	if a := putTnFor("macB"); a != "" {
-		t.Fatalf("the door was called before it was tried: %q", a)
-	}
-	if _, _, _, err := putConnectTailnet(b, "macA", time.Now().Add(10*time.Second)); err != errPutTnSkip {
-		t.Fatalf("a stream before the door was tried: %v", err)
-	}
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("finding out held the caller %v", d)
-	}
-	for end := time.Now().Add(5 * time.Second); putTnFor("macB") == "" && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
-	}
 	if putTnFor("macB") == "" {
 		t.Fatal("a door that takes connections was not called")
+	}
+	if d := time.Since(start); d > putTnQuickWait+500*time.Millisecond {
+		t.Fatalf("finding out held the caller %v", d)
+	}
+	// A "no" found out long ago (this Mac slept, or was elsewhere) is found
+	// out again by the stream.
+	putTn.Lock()
+	putTn.reach["macB"] = putTnReach{addr: putTn.addr["macB"], at: time.Now().Add(-2 * putTnReachFresh)}
+	putTn.Unlock()
+	if putTnFor("macB") == "" {
+		t.Fatal("an old no kept a door that takes connections from being called")
 	}
 	local, app := net.Pipe()
 	putPark(local)
@@ -407,10 +407,21 @@ func TestPutTailnetBehindRouter(t *testing.T) {
 	dead := ln.Addr().String()
 	ln.Close()
 	putTnSet("macStudy01", dead)
-	putTnFor("macStudy01")
-	time.Sleep(500 * time.Millisecond)
 	if a := putTnFor("macStudy01"); a != "" {
 		t.Fatalf("a door that takes no connection was called: %q", a)
+	}
+	// Found out once, it is not knocked at again by the next stream.
+	putTn.Lock()
+	at := putTn.reach["macStudy01"].at
+	putTn.Unlock()
+	if a := putTnFor("macStudy01"); a != "" || at.IsZero() {
+		t.Fatalf("a door that takes no connection: %q, found out at %v", a, at)
+	}
+	putTn.Lock()
+	again := putTn.reach["macStudy01"].at
+	putTn.Unlock()
+	if !again.Equal(at) {
+		t.Fatalf("a fresh no was knocked at again (%v, then %v)", at, again)
 	}
 	if p := putPathTailnet(context.Background(), "macStudy01"); p != nil {
 		t.Fatalf("path to a door not reached: %+v", p)

@@ -33,7 +33,13 @@ package main
 // from, only its key. So that a Mac with no such router does not lose
 // putTnWait on every stream, the peer's door is tried apart from any stream
 // (putTnProbe: a TCP connection to it, when the address is learned and every
-// putTnReachEvery after), and streams go there only while it last answered.
+// putTnReachEvery after, putTnWatchDoors), and streams go there only while it
+// last answered. What was found out more than putTnReachFresh ago (this Mac
+// slept, or the address is new) is not believed: the stream knocks at the
+// door itself first, for at most putTnQuickWait. Until 2026-11-26 an old "no"
+// was believed until the next stream found out again, and that stream went by
+// tailcat meanwhile (user 2026-11-26: a screen went through DERP while the
+// tailnet, through the router, answered in about 60 ms).
 //
 // FALLING BACK. The tailnet gets putTnWait to have the stream's answer begun;
 // then the stream goes by tailcat in the time left, as it always did. A peer
@@ -79,9 +85,13 @@ const (
 	// The door's handshake and the stream's request, at most this long.
 	putTnHandshakeWait = 5 * time.Second
 	// From a Mac that is not on a tailnet itself: how long a peer's door has
-	// to take a connection, and how long what it did is believed.
+	// to take a connection, how often it is tried apart from any stream, how
+	// long what it did is believed by a stream, and how long a stream waits
+	// at a door knocked at again because what was known is older than that.
 	putTnProbeWait  = 3 * time.Second
-	putTnReachEvery = 5 * time.Minute
+	putTnReachEvery = 30 * time.Second
+	putTnReachFresh = 2 * putTnReachEvery
+	putTnQuickWait  = time.Second
 )
 
 // putTnWait is the tailnet's time to answer before tailcat is tried; a test
@@ -150,33 +160,96 @@ func putTnLearn(agent, v string) {
 	putTn.addr[agent] = a
 	putTn.Unlock()
 	if !tailnetOff() && putTnSelf() == "" {
-		// Whether this Mac gets there at all is found out before a stream asks.
+		// Whether this Mac gets there at all is found out before a stream asks,
+		// and found out again while the helper runs.
 		putTn.Lock()
 		putTnReachableLocked(agent)
 		putTn.Unlock()
+		putTnWatchDoors()
 	}
+}
+
+var putTnWatching sync.Once
+
+// putTnWatchDoors has the doors of the peers this Mac knows a tailnet road
+// of tried every putTnReachEvery or so while this Mac is not on a tailnet
+// itself, so that a stream finds what was found out a moment ago.
+func putTnWatchDoors() {
+	putTnWatching.Do(func() {
+		go func() {
+			tick := time.NewTicker(putTnReachEvery / 2)
+			defer tick.Stop()
+			for range tick.C {
+				if tailnetOff() || putTnSelf() != "" {
+					continue
+				}
+				putTn.Lock()
+				for agent := range putTn.addr {
+					putTnReachableLocked(agent)
+				}
+				putTn.Unlock()
+			}
+		}()
+	})
 }
 
 // putTnFor is where the peer listens on the tailnet, when this Mac knows
 // where, the peer has not just failed there, and this Mac is on a tailnet or
-// was last seen to get to that door without being on one.
+// gets to that door without being on one: as last seen, when that was within
+// putTnReachFresh, or else as a knock now finds.
 func putTnFor(agent string) string {
 	if tailnetOff() {
 		return ""
 	}
 	self := putTnSelf()
 	putTn.Lock()
+	addr := putTn.addr[agent]
+	if addr == "" || time.Now().Before(putTn.rest[agent]) {
+		putTn.Unlock()
+		return ""
+	}
+	if self != "" {
+		putTn.Unlock()
+		return addr
+	}
+	r := putTn.reach[agent]
+	putTn.Unlock()
+	// The door found open and the door dialed are the same one: what was
+	// found out counts only for the address it was found out at.
+	if r.addr == addr && !r.at.IsZero() && time.Since(r.at) < putTnReachFresh {
+		if r.ok {
+			return addr
+		}
+		return ""
+	}
+	if putTnKnockNow(agent, addr) {
+		return addr
+	}
+	return ""
+}
+
+// putTnKnockNow knocks at the peer's door for a stream, for at most
+// putTnQuickWait, and keeps what it found while that is still the peer's
+// address.
+func putTnKnockNow(agent, addr string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), putTnQuickWait)
+	defer cancel()
+	_, err := putTnKnock(ctx, addr)
+	putTn.Lock()
 	defer putTn.Unlock()
-	// The door found open and the door dialed are the same one: both are
-	// read under one lock, so an address learned in between is not dialed
-	// before it has been tried.
-	if self == "" && !putTnReachableLocked(agent) {
-		return ""
+	if putTn.addr[agent] != addr {
+		return false
 	}
-	if time.Now().Before(putTn.rest[agent]) {
-		return ""
+	r := putTn.reach[agent]
+	if r.addr != addr {
+		r = putTnReach{addr: addr}
 	}
-	return putTn.addr[agent]
+	r.ok, r.at = err == nil, time.Now()
+	if putTn.reach == nil {
+		putTn.reach = map[string]putTnReach{}
+	}
+	putTn.reach[agent] = r
+	return r.ok
 }
 
 // putTnReachable is putTnReachableLocked for a caller that does not hold
