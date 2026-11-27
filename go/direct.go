@@ -880,6 +880,16 @@ func directCapsFor(r *http.Request) []string {
 					caps = append(caps, transport.CapSpeedNet)
 					// The pages it serves on its tailnet (serve.go).
 					caps = append(caps, transport.CapServe)
+					// The programs on its ports (ports.go), where they
+					// can be read.
+					if portsSupported() {
+						caps = append(caps, transport.CapPorts)
+					}
+					// out's History on this Mac (put_history.go), where
+					// out is.
+					if putSupported && putHere() {
+						caps = append(caps, transport.CapPutHistory)
+					}
 				}
 				return caps
 			}
@@ -1055,10 +1065,17 @@ func (h *directHandler) command(w http.ResponseWriter, r *http.Request) {
 			// nothing of this.
 			if clone != nil {
 				res = consoleResult{ID: c.ID, Kind: "files", Target: c.Target, Code: -1, Error: "not-allowed"}
+				releaseCmd()
+			} else if c.Target == "put-history" {
+				// out's History (put_history.go) waits on out and changes
+				// nothing here: the gate goes once the command is verified,
+				// as a terminal's does, and a slow out holds up no other.
+				releaseCmd()
+				res = runFilesCommand(c, peer, hasPeer, commandSigner(c, id, loadTrust()))
 			} else {
 				res = runFilesCommand(c, peer, hasPeer, commandSigner(c, id, loadTrust()))
+				releaseCmd()
 			}
-			releaseCmd()
 		} else {
 			res, swap = runCommand(c)
 			releaseCmd()

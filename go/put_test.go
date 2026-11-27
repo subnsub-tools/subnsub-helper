@@ -76,6 +76,7 @@ func putReset() {
 	}
 	putLocal.screens = nil
 	putLocal.Unlock()
+	putHistoryReset()
 }
 
 func testPutAddr(t *testing.T) string {

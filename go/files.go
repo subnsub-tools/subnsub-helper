@@ -1028,6 +1028,21 @@ type filesArgs struct {
 	Port   int    `json:"port"`
 	Route  string `json:"route"`
 	Target string `json:"target"`
+	// put-history (put_history.go): the page after the entry at this time
+	// (Unix milliseconds) with this id; none for the newest.
+	Before   int64  `json:"before"`
+	BeforeID string `json:"beforeId"`
+	// ports-end (ports.go): the program, by its pid and its start; force:
+	// SIGKILL. ports-icons: the keys a list gave. ports-stop-container: ID
+	// and Name. serve-port (serve.go): the local port to serve on Port.
+	PID   int      `json:"pid"`
+	Start string   `json:"start"`
+	Force bool     `json:"force"`
+	Keys  []string `json:"keys"`
+	Local int      `json:"local"`
+	// serve-port (serve.go): the address the program at Local listens on,
+	// as ports-list gave it.
+	Addr string `json:"addr"`
 }
 
 // runFilesCommand is a signed files command, from the tunnel's command door
@@ -1110,8 +1125,24 @@ func runFilesCommand(c consoleCmd, peer key.NodePublic, hasPeer bool, signer ed2
 			return res
 		}
 		out = body
-	case "serve-list", "serve-add", "serve-stop":
+	case "serve-list", "serve-add", "serve-stop", "serve-port":
 		body, code := runServeCommand(c.Target, arg)
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		out = body
+	case "ports-list", "ports-end", "ports-icons", "ports-stop-container":
+		// The Ports view (ports.go).
+		body, code := runPortsCommand(c.Target, arg)
+		if code != "" {
+			res.Error = code
+			return res
+		}
+		out = body
+	case "put-history":
+		// out's History on this Mac, for the Clipboard tab (put_history.go).
+		body, code := runPutHistory(arg)
 		if code != "" {
 			res.Error = code
 			return res

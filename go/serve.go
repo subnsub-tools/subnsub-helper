@@ -168,6 +168,12 @@ func runServeCommand(op string, arg filesArgs) (any, string) {
 			return nil, code
 		}
 		return it, ""
+	case "serve-port":
+		it, code := serveProxyAdd(ctx, arg.Port, arg.Local, arg.Addr)
+		if code != "" {
+			return nil, code
+		}
+		return it, ""
 	case "serve-stop":
 		if code := serveStop(ctx, arg.Port, arg.Route, arg.Dir, arg.Target); code != "" {
 			return nil, code
@@ -677,6 +683,119 @@ func serveAdd(ctx context.Context, dirRaw string, port int) (serveItem, string) 
 	it := serveItem{Port: port, Route: "/", Kind: "folder", Dir: dir}
 	serveStatInto(&it, time.Now().Add(serveScanAll))
 	return it, ""
+}
+
+// serveProxyAdd serves on a port of the tailnet what a program here serves
+// on the local port (the Ports view's Serve on the tailnet): the serve
+// config proxies the tailnet port to it, on 127.0.0.1 or ::1, whichever it
+// answers on.
+func serveProxyAdd(ctx context.Context, port, local int, addr string) (serveItem, string) {
+	if port < servePortMin || port > 65535 || port == tailnetPort || local < 1 || local > 65535 {
+		return serveItem{}, "bad-port"
+	}
+	hosts, code := serveProxyHosts(addr)
+	if code != "" {
+		return serveItem{}, code
+	}
+	target, answered := "", false
+	for _, h := range hosts {
+		hp := net.JoinHostPort(h, strconv.Itoa(local))
+		ok, open := serveAnswersHTTP(ctx, hp)
+		answered = answered || open
+		if ok {
+			target = "http://" + hp
+			break
+		}
+	}
+	if target == "" {
+		if answered {
+			return serveItem{}, "not-http"
+		}
+		return serveItem{}, "not-listening"
+	}
+	state, host, _ := serveSelf(ctx)
+	if state != "ok" {
+		return serveItem{}, "ts-" + state
+	}
+	if host == "" {
+		return serveItem{}, "ts-no-name"
+	}
+	serveOwn.Lock()
+	defer serveOwn.Unlock()
+	if _, ok := serveOwn.run[port]; ok {
+		return serveItem{}, "port-taken"
+	}
+	hp := host + ":" + strconv.Itoa(port)
+	code = serveEdit(ctx, func(tcp, web, _ map[string]json.RawMessage) (bool, string) {
+		if _, ok := tcp[strconv.Itoa(port)]; ok {
+			return false, "port-taken"
+		}
+		for k := range web {
+			if servePortOf(k) == port {
+				return false, "port-taken"
+			}
+		}
+		tcp[strconv.Itoa(port)] = json.RawMessage(`{"HTTP":true}`)
+		h, _ := json.Marshal(map[string]any{"Handlers": map[string]any{"/": map[string]string{"Proxy": target}}})
+		web[hp] = h
+		return true, ""
+	})
+	if code != "" {
+		return serveItem{}, code
+	}
+	return serveItem{Port: port, Route: "/", Kind: "proxy", Target: target}, ""
+}
+
+// serveProxyHosts: where the program listening on addr is reached from
+// here. Its own address when it listens on one of this computer's, the
+// loopback of its family when on every address; none given (a page from
+// before addr), IPv4's loopback then IPv6's. Any other address is refused:
+// the proxy reaches this computer's programs, not another computer.
+func serveProxyHosts(addr string) ([]string, string) {
+	switch addr {
+	case "":
+		return []string{"127.0.0.1", "::1"}, ""
+	case "*", "0.0.0.0":
+		return []string{"127.0.0.1"}, ""
+	case "::":
+		return []string{"::1", "127.0.0.1"}, ""
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return nil, "bad-args"
+	}
+	if ip.IsLoopback() {
+		return []string{ip.String()}, ""
+	}
+	if as, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range as {
+			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+				return []string{ip.String()}, ""
+			}
+		}
+	}
+	return nil, "bad-args"
+}
+
+// serveAnswersHTTP: whether hp takes a connection (open), and answers a
+// HEAD request as an HTTP server does (ok). An SSH or database port, or
+// one that speaks only TLS, is open but not ok.
+func serveAnswersHTTP(ctx context.Context, hp string) (ok, open bool) {
+	d := net.Dialer{Timeout: time.Second}
+	c, err := d.DialContext(ctx, "tcp", hp)
+	if err != nil {
+		return false, false
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Write([]byte("HEAD / HTTP/1.0\r\nHost: " + hp + "\r\nUser-Agent: subnsub-helper\r\n\r\n")); err != nil {
+		return false, true
+	}
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(c, buf); err != nil {
+		return false, true
+	}
+	return string(buf) == "HTTP/", true
 }
 
 // serveStop takes off the serve config the handler on route of the port,

@@ -41,6 +41,8 @@ package main
 //	                             page's screen was on)
 //	{"op":"path","agent":"…"}  → {"ok":true}, then a line a second: how the
 //	                             tailnet and the tunnel reach that Mac (put_path.go)
+//	{"op":"history"}           → waits; {"ask":"history"}, and out answers its
+//	                             History as one line (put_history.go)
 //
 // Until 2026.11.25.4 there was {"op":"screen-hp"}: the helper signed in to
 // this Mac's own Screen Sharing for out and sent out its session. out is that
@@ -176,6 +178,9 @@ func putHere() bool {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 			return true
 		}
+	}
+	if putHistoryWaiting() > 0 {
+		return true
 	}
 	putLocal.Lock()
 	defer putLocal.Unlock()
@@ -898,7 +903,7 @@ func servePutLocal(c net.Conn) {
 	// Only the user's own programs reach this socket, and put asks these: it
 	// is on this Mac. A hint rather than proof of the app, as the socket is.
 	switch ask.Op {
-	case "peers", "open", "accept", "screen", "path", "host", "unhost":
+	case "peers", "open", "accept", "screen", "path", "host", "unhost", "history":
 		putSeen.Store(true)
 	}
 	switch ask.Op {
@@ -932,6 +937,13 @@ func servePutLocal(c net.Conn) {
 			return
 		}
 		putParkScreen(c)
+	case "history":
+		if r.Buffered() > 0 {
+			// Nothing may follow until the page has asked.
+			c.Close()
+			return
+		}
+		putParkHistory(c)
 	case "path":
 		putPathServe(c, ask.Agent)
 	case "open":

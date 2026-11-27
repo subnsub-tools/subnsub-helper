@@ -204,6 +204,13 @@ const (
 	// primary helper and be given its tailnet link; a primary asks such a
 	// member host-key (main package, host.go).
 	CapHost = "host"
+	// CapPutHistory: the Clipboard tab may read out's History on this Mac
+	// (main package, put_history.go) — the console's grant, as Files is.
+	CapPutHistory = "put-history"
+	// CapPorts: the Demos tab's Ports view may list the programs listening
+	// on this machine's TCP ports and end one of this account's (helper
+	// ports.go) — the console's grant, as Files is.
+	CapPorts = "ports"
 )
 
 // Frame is the envelope. Body is kept as raw JSON so a router can dispatch on
